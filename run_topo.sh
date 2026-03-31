@@ -8,7 +8,9 @@
 #SBATCH --output=topo_1a4k_%j.out
 
 cd ~/TopoFormer
+source /mnt/home/woldring/anaconda3/etc/profile.d/conda.sh
 conda activate topoformer
+mkdir -p ./output
 
 python code_pkg/main_potein_ligand_topo_embedding.py \
   --output_feature_folder "./output" \
