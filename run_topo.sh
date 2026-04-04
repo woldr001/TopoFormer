@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash --login
 #SBATCH --job-name=topo_1a4k
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
