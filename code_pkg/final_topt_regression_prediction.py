@@ -183,7 +183,51 @@ def main_get_predictions_for_docking():
     return None
 
 
+def main_cli(args):
+    """CLI entry point for single-complex prediction used by run_many.sb.
+
+    Prints one line to stdout: "<ensemble_pK> <inference_seconds>"
+    which the calling shell script captures with awk '{print $1}' / '{print $2}'.
+    """
+    import time
+
+    feat = np.load(args.feature_path).astype(np.float32)  # [6, 100, 143]
+    feat = feat[np.newaxis, ...]                            # [1, 6, 100, 143]
+
+    scaler = pickle.load(open(args.scaler_path, 'rb'))
+    n, c, h, w = feat.shape
+    feat_scaled = scaler.transform(feat.reshape(n, -1)).reshape(n, c, h, w)
+    model_input = BatchFeature({"topological_features": feat_scaled}, tensor_type='pt')
+
+    t0 = time.time()
+    preds = []
+    for model_dir in args.model_dir:
+        model = TopTForImageClassification.from_pretrained(model_dir)
+        model.eval()
+        with torch.no_grad():
+            out = model(**model_input)
+        preds.append(out.logits.squeeze().item())
+    t_inf = time.time() - t0
+
+    print(f"{np.mean(preds):.4f} {t_inf:.3f}")
+
+
 def main():
+    # CLI mode: triggered when --feature_path is present
+    if '--feature_path' in sys.argv:
+        parser = argparse.ArgumentParser(description="Single-complex binding affinity prediction")
+        parser.add_argument('--feature_path', required=True,
+                            help='Path to .npy topological feature file')
+        parser.add_argument('--model_dir', required=True, nargs='+',
+                            help='One or more fine-tuned model directories (ensemble averaged)')
+        parser.add_argument('--scaler_path',
+                            default='./code_pkg/pretrain_data_standard_minmax_6channel_large.sav',
+                            help='Path to fitted scaler .sav file')
+        args = parser.parse_args()
+        main_cli(args)
+        return None
+
+    # Legacy batch mode (original hardcoded runs)
     # get_predictions()
     # main_get_predictions_for_scoring()
     main_get_predictions_for_scoring_2020()

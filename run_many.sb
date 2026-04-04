@@ -4,41 +4,92 @@
 #SBATCH --mem=64G
 #SBATCH --gpus=h200:1
 #SBATCH --cpus-per-task=2
-#SBATCH --output=/mnt/scratch/jeaves/TopoFormer/logs/%x_%A_%a.out
-#SBATCH --error=/mnt/scratch/jeaves/TopoFormer/logs/%x_%A_%a.err
+#SBATCH --output=%x_%A_%a.out
+#SBATCH --error=%x_%A_%a.err
+
+# =============================================================================
+# run_many.sb — batch TopoFormer feature extraction + prediction
+#
+# Reads a CSV of protein-ligand complexes and writes predicted binding
+# affinities (pKd/pKi) plus per-step timings to an output CSV.
+#
+# Required directory layout under BASE_DIR:
+#   casf2016_smiles_seqs_cleaned.csv   — input CSV (header: pdbid,smiles,sequence)
+#   coreset/{pdbid}/{pdbid}_pocket.pdb — protein pocket file per complex
+#   coreset/{pdbid}/{pdbid}_ligand.mol2 — ligand file per complex
+#
+# Output:
+#   casf2016_TopoFormer_preds_and_times.csv — pdbid,pK_predicted,t_prep_s,t_inf_s
+#
+# Submit from inside the repo directory:
+#   cd ~/TopoFormer
+#   sbatch run_many.sb
+# =============================================================================
 
 set -euo pipefail
 
+# --- Configurable paths ------------------------------------------------------
+REPO_DIR="$SLURM_SUBMIT_DIR"                          # repo root (where sbatch was called)
+BASE_DIR="/mnt/home/woldring/TopoFormer"               # data root (CSV + coreset/)
+MODEL_BASE="/mnt/home/woldring/TopoFormer/TopTransformer/Output_dir/shared_finetuned_model_casf_2016_at_11212025"
+SCALER="${REPO_DIR}/code_pkg/pretrain_data_standard_minmax_6channel_large.sav"
+CSV_PATH="${BASE_DIR}/casf2016_smiles_seqs_cleaned.csv"
+OUT_CSV="${BASE_DIR}/casf2016_TopoFormer_preds_and_times.csv"
+# -----------------------------------------------------------------------------
+
+mkdir -p "${BASE_DIR}/logs"
+
 module purge
-module load Miniforge3
+module load Conda/3
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate topoformer
 
-BASE_DIR="/mnt/scratch/jeaves/TopoFormer"
-CSV_PATH="${BASE_DIR}/casf2016_smiles_seqs_cleaned.csv"
-# LABELS="${BASE_DIR}/test2016.csv"
-OUT_CSV="${BASE_DIR}/casf2016-pocket0_TopoFormer_preds_and_times.csv"
+cd "$REPO_DIR"
 
 echo "pdbid,pK_predicted,t_prep_s,t_inf_s" > "$OUT_CSV"
 
 while IFS=',' read -r pdbid smiles sequence || [[ -n "$pdbid" ]]; do
-    pdbid="${pdbid//$'\r'/}"
+    # Strip whitespace and carriage returns
+    pdbid="$(echo "${pdbid//$'\r'/}" | xargs)"
     pdbid="${pdbid//\"/}"
-    pdbid="$(echo "$pdbid" | xargs)"
 
     pdb_dir="${BASE_DIR}/coreset/${pdbid}"
     protein="${pdb_dir}/${pdbid}_pocket.pdb"
     ligand="${pdb_dir}/${pdbid}_ligand.mol2"
 
-    t_prep=$(python3 code_pkg/main_potein_ligand_topo_embedding.py --protein_file "$protein" --ligand_file "$ligand" --output_feature_folder "$pdb_dir" | tail -1)
+    if [[ ! -f "$protein" || ! -f "$ligand" ]]; then
+        echo "WARNING: skipping ${pdbid} — missing structure files" >&2
+        continue
+    fi
 
-    echo "${t_prep}"
+    # Feature extraction — last stdout line is elapsed seconds (t_prep)
+    t_prep=$(python3 code_pkg/main_potein_ligand_topo_embedding.py \
+        --protein_file   "$protein" \
+        --ligand_file    "$ligand" \
+        --output_feature_folder "$pdb_dir" \
+        --output_feature_name   "$pdbid" \
+        | tail -1)
 
-    py_out=$(python3 code_pkg/final_topt_regression_prediction.py --feature_dir "${BASE_DIR}/graphs_pocket" --sample_id "${pdbid}" --model_dir home/chendo11/workfolder/TopTransformer/Output_dir/shared_finetuned_model_casf_2016_at_11212025/model_cls_0)
-    pk=$(echo "$py_out" | awk '{print $1}')
+    feature_path="${pdb_dir}/${pdbid}.npy"
+    if [[ ! -f "$feature_path" ]]; then
+        echo "WARNING: skipping ${pdbid} — feature extraction failed" >&2
+        continue
+    fi
+
+    # Ensemble prediction — stdout is "<pK> <t_inf>"
+    py_out=$(python3 code_pkg/final_topt_regression_prediction.py \
+        --feature_path  "$feature_path" \
+        --scaler_path   "$SCALER" \
+        --model_dir \
+            "${MODEL_BASE}/model_cls_0" \
+            "${MODEL_BASE}/model_cls_1" \
+            "${MODEL_BASE}/model_cls_2")
+
+    pk=$(echo "$py_out"    | awk '{print $1}')
     t_inf=$(echo "$py_out" | awk '{print $2}')
-
-    echo "${pk},${t_inf}"
 
     echo "${pdbid},${pk},${t_prep},${t_inf}" | tee -a "$OUT_CSV"
 
 done < <(tail -n +2 "$CSV_PATH")
+
+echo "Done. Results written to ${OUT_CSV}"
