@@ -11,6 +11,7 @@
 cd "$SLURM_SUBMIT_DIR"
 
 # Initialize conda shell hooks so that 'conda activate' works in batch jobs
+module purge
 module load Conda/3
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate topoformer
