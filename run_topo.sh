@@ -7,9 +7,14 @@
 #SBATCH --time=01:00:00
 #SBATCH --output=topo_1a4k_%j.out
 
-cd ~/TopoFormer
+# Use the directory where sbatch was called from (avoids ~/home mount path issues)
+cd "$SLURM_SUBMIT_DIR"
+
+# Initialize conda shell hooks so that 'conda activate' works in batch jobs
 module load Conda/3
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate topoformer
+
 mkdir -p ./output
 
 python code_pkg/main_potein_ligand_topo_embedding.py \
