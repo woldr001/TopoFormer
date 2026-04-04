@@ -8,7 +8,7 @@
 #SBATCH --output=topo_1a4k_%j.out
 
 cd ~/TopoFormer
-source /mnt/home/woldring/anaconda3/etc/profile.d/conda.sh
+module load Conda/3
 conda activate topoformer
 mkdir -p ./output
 
