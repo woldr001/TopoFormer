@@ -1,0 +1,44 @@
+#!/bin/bash --login
+#SBATCH --job-name=topoformer
+#SBATCH --time=08:00:00
+#SBATCH --mem=64G
+#SBATCH --gpus=h200:1
+#SBATCH --cpus-per-task=2
+#SBATCH --output=/mnt/scratch/jeaves/TopoFormer/logs/%x_%A_%a.out
+#SBATCH --error=/mnt/scratch/jeaves/TopoFormer/logs/%x_%A_%a.err
+
+set -euo pipefail
+
+module purge
+module load Miniforge3
+conda activate topoformer
+
+BASE_DIR="/mnt/scratch/jeaves/TopoFormer"
+CSV_PATH="${BASE_DIR}/casf2016_smiles_seqs_cleaned.csv"
+# LABELS="${BASE_DIR}/test2016.csv"
+OUT_CSV="${BASE_DIR}/casf2016-pocket0_TopoFormer_preds_and_times.csv"
+
+echo "pdbid,pK_predicted,t_prep_s,t_inf_s" > "$OUT_CSV"
+
+while IFS=',' read -r pdbid smiles sequence || [[ -n "$pdbid" ]]; do
+    pdbid="${pdbid//$'\r'/}"
+    pdbid="${pdbid//\"/}"
+    pdbid="$(echo "$pdbid" | xargs)"
+
+    pdb_dir="${BASE_DIR}/coreset/${pdbid}"
+    protein="${pdb_dir}/${pdbid}_pocket.pdb"
+    ligand="${pdb_dir}/${pdbid}_ligand.mol2"
+
+    t_prep=$(python3 code_pkg/main_potein_ligand_topo_embedding.py --protein_file "$protein" --ligand_file "$ligand" --output_feature_folder "$pdb_dir" | tail -1)
+
+    echo "${t_prep}"
+
+    py_out=$(python3 code_pkg/final_topt_regression_prediction.py --feature_dir "${BASE_DIR}/graphs_pocket" --sample_id "${pdbid}" --model_dir home/chendo11/workfolder/TopTransformer/Output_dir/shared_finetuned_model_casf_2016_at_11212025/model_cls_0)
+    pk=$(echo "$py_out" | awk '{print $1}')
+    t_inf=$(echo "$py_out" | awk '{print $2}')
+
+    echo "${pk},${t_inf}"
+
+    echo "${pdbid},${pk},${t_prep},${t_inf}" | tee -a "$OUT_CSV"
+
+done < <(tail -n +2 "$CSV_PATH")
