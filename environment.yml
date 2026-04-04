@@ -1,0 +1,27 @@
+# Minimal conda environment for TopoFormer on MSU HPCC (AMD24-H200 nodes)
+#
+# Usage:
+#   module load Conda/3
+#   conda env create -f environment.yml
+#   conda activate topoformer
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#
+# PyTorch is installed separately because conda YAML pip deps do not support
+# custom index URLs. Adjust the torch/CUDA version if your nodes differ:
+#   CUDA 12.1 -> https://download.pytorch.org/whl/cu121
+#   CUDA 11.8 -> https://download.pytorch.org/whl/cu118
+#
+# Verified working on MSU HPCC dev-amd24-h200 with CUDA 12.4 (April 2025).
+
+name: topoformer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+    - transformers==4.24.0
+    - numpy==1.21.5
+    - scipy==1.7.3
+    - scikit-learn==1.0.2
