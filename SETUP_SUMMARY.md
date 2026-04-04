@@ -119,9 +119,10 @@ Edit `run_topo.sh` to point to your protein and ligand files:
 --ligand_file  "/path/to/your_ligand.mol2" \
 ```
 
-Then submit the job:
+Then submit the job **from inside your TopoFormer directory**:
 
 ```bash
+cd ~/TopoFormer
 sbatch run_topo.sh
 ```
 
@@ -129,6 +130,13 @@ This produces `./output/<protein_id>.npy` (shape: `[6, 100, 143]`).
 
 **Do not run this on the dev/login node** — the Laplacian eigenvalue computation is
 memory-intensive and will be killed by the node's OOM limits.
+
+> **Why `cd ~/TopoFormer` before `sbatch`?** The script uses `$SLURM_SUBMIT_DIR` (the
+> directory where you called `sbatch`) as its working directory. This avoids a subtle HPC
+> pitfall: `~/` resolves to different NFS mounts on dev nodes (`/mnt/home/...`) vs. compute
+> nodes (`/mnt/ffs24/home/...`), so hardcoding `cd ~/TopoFormer` inside the script causes
+> `mkdir -p ./output` and the Python process to land in different directories. Calling
+> `sbatch` from the correct directory sidesteps this entirely.
 
 The output feature file name is derived automatically from your protein filename:
 the script strips everything from `_protein` onward. For example,
@@ -151,9 +159,15 @@ Then run:
 
 ```bash
 module load Conda/3
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate topoformer
 python predict_single.py
 ```
+
+> **Why `source conda.sh`?** `module load Conda/3` puts the `conda` binary on your PATH,
+> but does not install the shell hooks that make `conda activate` switch environments.
+> Without sourcing `conda.sh`, `conda activate` appears to succeed but the previously-active
+> environment remains in effect. This is the same fix applied inside `run_topo.sh`.
 
 Example output:
 ```
@@ -182,7 +196,8 @@ Ensemble mean (pKd/pKi): 7.434
 | `conda: command not found` | Conda not in PATH on this node | Run `module load Conda/3` |
 | `Could not find conda environment: topoformer` | Environment not initialized in batch job | Add `module load Conda/3` before `conda activate` in your SLURM script |
 | `numpy==1.21.5` install fails with Python version error | Conda created the env with Python ≥3.11 instead of 3.9 | Recreate: `conda remove -n topoformer --all -y && conda create -n topoformer python=3.9 -y` |
-| `FileNotFoundError: ./output/1a4k.npy` | `./output/` directory does not exist | Already fixed in `run_topo.sh` (`mkdir -p ./output`); create it manually if running outside the script |
+| `FileNotFoundError: ./output/1a4k.npy` in batch job despite `mkdir -p ./output` in script | Dev and compute nodes mount home at different paths (`/mnt/home` vs `/mnt/ffs24/home`), so the script's working directory differed from where Python ran | Always `cd ~/TopoFormer` before running `sbatch run_topo.sh` so `$SLURM_SUBMIT_DIR` resolves correctly |
+| Wrong conda env used in batch job (e.g., `foundry_clean` instead of `topoformer`) | `module load Conda/3` adds `conda` to PATH but does not install shell hooks; `conda activate` silently fails and keeps the prior env | Add `source "$(conda info --base)/etc/profile.d/conda.sh"` after `module load Conda/3` and before `conda activate` — already present in `run_topo.sh` |
 | Conda YAML env create fails with solver conflicts | Full-export YAML (200+ pinned packages) is machine-specific | Use `environment.yml` in this repo (minimal spec) or the manual install in Option B above |
 | `torch` not found after `conda env create -f environment.yml` | PyTorch requires a custom index URL, excluded from YAML | Run `pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124` after activating the env |
 
