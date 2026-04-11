@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+*.sav
+*.npy
+!code_pkg/pretrain_data_standard_minmax_*.sav
+*.log
+.DS_Store
+*.swp
