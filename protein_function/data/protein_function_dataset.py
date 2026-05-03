@@ -234,7 +234,7 @@ class ProteinFunctionDataset(Dataset):
         label_df: pd.DataFrame,
         go_terms: List[str],
         topo_scaler: Optional[Pipeline] = None,
-        topo_feature_shape: Tuple[int, int, int] = (6, 200, 15),
+        topo_feature_shape: Tuple[int, int, int] = (12, 200, 121),
     ):
         self.protein_ids = protein_ids
         self.topo_dir = topo_dir

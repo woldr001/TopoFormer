@@ -1,19 +1,21 @@
-"""Configuration factory for the mini TopoT encoder used in protein function prediction.
+"""Configuration factories for the mini TopoT encoder used in protein function prediction.
 
-The original TopoFormer encoder is configured for [B, 6, 100, 143] protein-ligand
-features (image_size=(100,143), patch_size=(1,143), hidden_size=768, 12 layers).
+Two feature modes are supported:
 
-For protein-only function prediction we use [B, 6, 200, 15] features:
-- 6 spectral statistics (channels)
-- 200 filtration steps (0–20 Å at 0.1 Å; height dimension)
-- 15 element-specific combinations (width dimension)
+**protein_only** (``get_mini_topt_config``):
+    Input [B, 6, 200, 15] — single-structure protein-only topology.
+    - 6 spectral statistics (channels)
+    - 200 filtration steps (0–20 Å)
+    - 15 element combinations (protein C/N/O/S singles/pairs/triples/all)
 
-Each patch covers one filtration step across all 15 combinations → 200 tokens,
-which is a natural sequence of topological snapshots ordered by scale.
+**ensemble_motion** (``get_ensemble_motion_topt_config``):
+    Input [B, 12, 200, 121] — motion-guided ensemble topology.
+    - 12 channels (6 stats × mean + 6 stats × std across 10 conformations)
+    - 200 filtration steps (0–20 Å)
+    - 121 element combinations (11 motion-side × 11 static-side cross-pairs)
 
-The encoder is deliberately smaller (hidden_size=256, 4 layers) because GO
-annotation datasets are 10–100× smaller than PDBbind, and a full 86M-parameter
-ViT would overfit.
+Both encoders use hidden_size=256, 4 layers (appropriate for GO annotation
+dataset scale of 30k–100k proteins; a full 86M-parameter ViT would overfit).
 """
 
 import sys
@@ -54,6 +56,63 @@ def get_mini_topt_config(
         attention_probs_dropout_prob: Dropout on attention weights.
         mask_ratio: Masking ratio (0.0 = disabled during inference/fine-tuning).
         pooler_type: How to pool encoder output ('cls_token' or 'avg_token').
+        **overrides: Any additional TopTConfig keyword arguments.
+
+    Returns:
+        A ``TopTConfig`` instance ready for ``TopTModel(config)``.
+    """
+    return TopTConfig(
+        num_channels=num_channels,
+        image_size=image_size,
+        patch_size=patch_size,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        intermediate_size=intermediate_size,
+        hidden_dropout_prob=hidden_dropout_prob,
+        attention_probs_dropout_prob=attention_probs_dropout_prob,
+        mask_ratio=mask_ratio,
+        pooler_type=pooler_type,
+        **overrides,
+    )
+
+
+def get_ensemble_motion_topt_config(
+    num_channels: int = 12,
+    image_size: tuple = (200, 121),
+    patch_size: tuple = (1, 121),
+    hidden_size: int = 256,
+    num_hidden_layers: int = 4,
+    num_attention_heads: int = 4,
+    intermediate_size: int = 1024,
+    hidden_dropout_prob: float = 0.1,
+    attention_probs_dropout_prob: float = 0.1,
+    mask_ratio: float = 0.0,
+    pooler_type: str = "cls_token",
+    **overrides,
+) -> TopTConfig:
+    """Return a TopTConfig sized for motion-guided ensemble [12, 200, 121] features.
+
+    The 12-channel input encodes ensemble information:
+      - Channels 0-5:  mean topology feature across 10 conformations
+      - Channels 6-11: std  topology feature across 10 conformations
+
+    The 121-combination width comes from 11 motion-side × 11 static-side element
+    cross-pairs (C/N/O/S singles, pairs, and all-heavy), mirroring the protein–ligand
+    cross-pair scheme of the original TopoFormer.
+
+    Args:
+        num_channels: Spectral statistic channels × ensemble stats (default 12).
+        image_size: (height, width) = (n_filtrations, n_combinations).
+        patch_size: (1, 121) gives one token per filtration step → 200 tokens.
+        hidden_size: Transformer hidden dimension (default 256).
+        num_hidden_layers: Number of transformer encoder layers (default 4).
+        num_attention_heads: Number of attention heads (default 4).
+        intermediate_size: Feed-forward intermediate dimension (default 1024).
+        hidden_dropout_prob: Dropout on hidden layers.
+        attention_probs_dropout_prob: Dropout on attention weights.
+        mask_ratio: 0.0 disables masking during fine-tuning.
+        pooler_type: 'cls_token' or 'avg_token'.
         **overrides: Any additional TopTConfig keyword arguments.
 
     Returns:
