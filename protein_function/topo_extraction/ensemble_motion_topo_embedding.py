@@ -632,9 +632,13 @@ def find_ensemble_pdbs(
         Sorted list of PDB file paths. Empty list if nothing found.
     """
     patterns = [
+        # aSAM ensemble output layout
+        os.path.join(pdb_dir, protein_id, "clustering.nodes_pipeline_v1", "raw.seed_*.pdb"),
+        # generic subdirectory layouts
         os.path.join(pdb_dir, protein_id, "cluster_repr_*.pdb"),
         os.path.join(pdb_dir, protein_id, f"{protein_id}_conf_*.pdb"),
         os.path.join(pdb_dir, protein_id, "*.pdb"),
+        # flat layouts
         os.path.join(pdb_dir, f"{protein_id}_conf_*.pdb"),
         os.path.join(pdb_dir, f"{protein_id}_*.pdb"),
     ]
