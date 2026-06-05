@@ -59,6 +59,29 @@ ASAM_SUBDIR  = "clustering.nodes_pipeline_v1"
 ASAM_PATTERN = "raw.seed_*.pdb"
 N_CONFORMERS = 10
 
+# UniProt accession regex (6-char and 10-char forms).
+# Ref: https://www.uniprot.org/help/accession_numbers
+#
+# 6-char rules:
+#   O/P/Q prefix → [OPQ][0-9][A-Z0-9]{3}[0-9]   (pos 3-5 may be digit or letter)
+#   other prefix → [A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]  (pos 3 must be a letter)
+# 10-char rule (only [A-NR-Z] prefix):
+#   [A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){2}
+_UNIPROT_AC_RE = re.compile(
+    r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]"                              # 6-char, O/P/Q
+    r"|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]"                         # 6-char, other
+    r"|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9][A-Z][A-Z0-9]{2}[0-9])$"  # 10-char
+)
+
+
+def is_uniprot_accession(protein_id: str) -> bool:
+    """Return True if protein_id looks like a UniProt accession.
+
+    Rejects PDB+chain IDs (e.g. '6c3u-A', '3gtu-B') and UniProt
+    mnemonic names (e.g. 'ADH2_YEAST') — both are excluded from training.
+    """
+    return bool(_UNIPROT_AC_RE.match(protein_id))
+
 
 def discover_ensemble_proteins(sampling_dir):
     """Return dict {protein_id: [pdb_path, ...]} for proteins with ≥1 PDB.
@@ -81,11 +104,17 @@ def discover_ensemble_proteins(sampling_dir):
 def parse_annotation_file(annotation_file):
     """Parse MF-annotation.txt → dict {protein_id: [go_term, ...]}.
 
-    Handles two formats on the same line:
-        6c3u-A,['GO:0051213']
-        ADH2_YEAST,['GO:0003674', 'GO:0003824']
+    Only retains entries whose ID is a valid UniProt accession.
+    PDB+chain IDs (e.g. '6c3u-A') and UniProt mnemonic names
+    (e.g. 'ADH2_YEAST') are silently skipped and counted.
+
+    Input format (either works):
+        P32234,['GO:0003924', 'GO:0005525']
+        6c3u-A,['GO:0051213']        ← skipped (PDB+chain)
     """
-    annot = {}
+    annot          = {}
+    n_skipped_pdb  = 0
+    n_skipped_other = 0
     go_re = re.compile(r"GO:\d+")
 
     with open(annotation_file) as fh:
@@ -94,7 +123,6 @@ def parse_annotation_file(annotation_file):
             if not line or line.startswith("#"):
                 continue
 
-            # Split on first comma only
             comma = line.find(",")
             if comma == -1:
                 print(f"  [warn] line {lineno}: no comma, skipping: {line!r}")
@@ -103,41 +131,68 @@ def parse_annotation_file(annotation_file):
             pid      = line[:comma].strip()
             go_field = line[comma + 1:].strip()
 
-            # Extract all GO: terms (handles Python-list literals and plain text)
+            if not is_uniprot_accession(pid):
+                if re.match(r"^\d\w{3}-\w+$", pid):   # looks like PDB+chain
+                    n_skipped_pdb += 1
+                else:
+                    n_skipped_other += 1
+                continue
+
             terms = go_re.findall(go_field)
             if not terms:
-                print(f"  [warn] line {lineno}: no GO terms found for {pid!r}: {go_field!r}")
+                print(f"  [warn] line {lineno}: no GO terms for {pid!r}: {go_field!r}")
                 continue
 
             annot[pid] = terms
 
+    print(f"    Skipped (PDB+chain IDs):  {n_skipped_pdb:,}")
+    print(f"    Skipped (other non-AC):   {n_skipped_other:,}")
     return annot
 
 
 def parse_fasta(fasta_file):
-    """Return dict {protein_id: sequence}.
+    """Return dict {protein_id: sequence}, keeping only UniProt accessions.
 
     Accepts both standard multi-line FASTA and single-line variants.
     The protein_id is the first whitespace-delimited token after '>'.
+    Entries whose ID is not a valid UniProt accession (e.g. PDB+chain
+    IDs like '1oat-A') are skipped and counted.
     """
-    seqs = {}
-    current_id  = None
-    current_seq = []
+    seqs           = {}
+    current_id     = None
+    current_seq    = []
+    n_skipped_pdb  = 0
+    n_skipped_other = 0
+
+    def _flush():
+        nonlocal current_id, current_seq
+        if current_id is not None and is_uniprot_accession(current_id):
+            seqs[current_id] = "".join(current_seq)
+        current_id  = None
+        current_seq = []
 
     with open(fasta_file) as fh:
         for line in fh:
             line = line.rstrip()
             if line.startswith(">"):
-                if current_id is not None:
-                    seqs[current_id] = "".join(current_seq)
-                current_id  = line[1:].split()[0]
+                _flush()
+                raw_id = line[1:].split()[0]
+                if not is_uniprot_accession(raw_id):
+                    if re.match(r"^\d\w{3}-\w+$", raw_id):
+                        n_skipped_pdb += 1
+                    else:
+                        n_skipped_other += 1
+                    current_id = None  # mark as skip-this-entry
+                else:
+                    current_id = raw_id
                 current_seq = []
             else:
                 current_seq.append(line)
 
-    if current_id is not None:
-        seqs[current_id] = "".join(current_seq)
+    _flush()
 
+    print(f"    Skipped FASTA entries (PDB+chain IDs): {n_skipped_pdb:,}")
+    print(f"    Skipped FASTA entries (other non-AC):  {n_skipped_other:,}")
     return seqs
 
 
