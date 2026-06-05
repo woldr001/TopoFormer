@@ -70,7 +70,7 @@ class SequenceFeatureProjector(nn.Module):
 
     def __init__(
         self,
-        esm_dim: int = 1152,
+        esm_dim: int = 1280,
         prottrans_dim: int = 1024,
         proj_dim: int = 512,
         dropout: float = 0.1,
@@ -144,7 +144,7 @@ class TopoFunctionModel(nn.Module):
             :func:`~protein_function.models.mini_topt_config.get_mini_topt_config`
             for the default protein-only configuration.
         num_mf_labels: Number of MF GO terms to predict (determined from data).
-        esm_dim: ESM embedding dimension (default 1152 for ESM-C 600M).
+        esm_dim: ESM embedding dimension (default 1280 for ESM-2 650M).
         prottrans_dim: ProtTrans T5 embedding dimension (default 1024).
         seq_proj_dim: Projection dimension per sequence model (default 512).
         fusion_hidden_dim: Hidden dimension of the fusion MLP (default 512).
@@ -152,7 +152,7 @@ class TopoFunctionModel(nn.Module):
         fusion_dropout: Dropout in the fusion MLP (default 0.3).
 
     Inputs to ``forward()``:
-        topo_features:      [B, 6, 200, 15]  protein topology features (scaled)
+        topo_features:      [B, 12, 200, 121] protein topology features (scaled)
         esm_features:       [B, esm_dim]     mean-pooled ESM embeddings
         prottrans_features: [B, prottrans_dim] mean-pooled ProtTrans embeddings
         labels:             [B, num_mf_labels] float multi-hot labels (optional)
@@ -165,7 +165,7 @@ class TopoFunctionModel(nn.Module):
         self,
         topt_config: TopTConfig = None,
         num_mf_labels: int = 490,
-        esm_dim: int = 1152,
+        esm_dim: int = 1280,
         prottrans_dim: int = 1024,
         seq_proj_dim: int = 512,
         fusion_hidden_dim: int = 512,
