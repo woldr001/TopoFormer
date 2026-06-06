@@ -434,7 +434,9 @@ def _extract_single_conformation_features(
                     filtration=filtration,
                     print_by_step=False,
                 )
-                for filt_idx, (eigvals, _) in enumerate(lap_features):
+                # Each element is a dict {0: [sorted eigenvalues]} from the dim-0 Laplacian.
+                for filt_idx, laplacian_eigenv in enumerate(lap_features):
+                    eigvals = np.array(laplacian_eigenv[0], dtype=np.float64)
                     stats = SimplicialComplex_laplacian.statistic_eigvalues(eigvals)
                     feature_array[:, filt_idx, combo_idx] = [
                         stats.count_zero,
