@@ -1,7 +1,7 @@
 # How-To: Train, Validate, and Test TopoFormer-MF on the MSU HPCC
 
 This guide explains how to use the `protein_function/` pipeline in the
-`claude/protein-topology-integration-ALbIE` branch to predict **Molecular Function (MF)**
+`protein-motion-topology` branch to predict **Molecular Function (MF)**
 Gene Ontology terms from a **protein structural ensemble**.
 
 It is written for our lab's workflow on the **MSU HPCC** and is intended to help a new team
@@ -221,32 +221,37 @@ For benchmarking against published methods, use the official CAFA3 temporal spli
 
 ## 6. Set up the software environment on the MSU HPCC
 
+The `topoformer_mf` conda environment is pre-created at
+`/mnt/home/woldring/.conda/envs/topoformer_mf`. On the MSU HPCC the system
+Miniforge3 module overrides `conda activate`, so activate by prepending the
+environment's `bin/` directly:
+
 ```bash
-module purge
-module load Miniforge3
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
 
-cd /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer
-conda env create -f environment.yml -n topoformer_mf
-conda activate topoformer_mf
+# Verify the right Python is active
+which python   # should show .../topoformer_mf/bin/python
 
-# Add packages not yet in environment.yml
-pip install "transformers==4.24.0"   # CRITICAL — newer versions break modeling_topt.py
-pip install torch torchvision torchaudio
-pip install pandas accelerate sentencepiece
+# Install any missing packages into the environment
+python -m pip install "transformers==4.24.0"   # CRITICAL — see below
+python -m pip install prody                    # required for NMA-PCA step
 ```
 
 > **Why `transformers==4.24.0`?**
 > `modeling_topt.py` imports `find_pruneable_heads_and_indices` from
 > `transformers.pytorch_utils`, a symbol removed in newer releases.
 
+All SLURM batch scripts in this repo already include this PATH export at the top,
+so you do not need to activate the environment manually before submitting jobs.
+
 ### Quick sanity check
 
 ```bash
+cd /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer
 python - <<'PY'
 import torch, transformers, pandas, numpy, scipy, sklearn
 from protein_function.models.mini_topt_config import get_ensemble_motion_topt_config
 from protein_function.models.modeling_topo_function import TopoFunctionModel
-import torch
 
 config = get_ensemble_motion_topt_config()
 model = TopoFunctionModel(config, num_mf_labels=100)
@@ -291,63 +296,51 @@ debugging time.
 
 ---
 
-## Step 2: Run the Ensemble_NMA-PCA pipeline
+## Step 2: Run the NMA-PCA pipeline
 
 This step is **required** for the motion-guided topology extraction. It produces the
-GNM/ANM/PCA profiles that determine which residues are treated as "motion" atoms.
+GNM/PCA profiles that determine which residues are treated as "motion" atoms.
 
-### Install
+The NMA-PCA script is built into this repository — no external pipeline is needed.
+It requires ProDy (`python -m pip install prody`).
 
-```bash
-git clone https://github.com/woldr001/Ensemble_NMA-PCA.git
-cd Ensemble_NMA-PCA
-pip install -r requirements.txt
-```
-
-### Single protein
+### Single protein (test run)
 
 ```bash
-python run_nma_pca.py \
-    --pdb_dir    /mnt/research/woldring_lab/TopoFormer-MF/datasets/pdbs/P12345 \
-    --output_dir /mnt/research/woldring_lab/TopoFormer-MF/datasets/nma_pca/P12345 \
-    --n_modes    10 \
-    --n_pcs      5
+cd /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
+
+python protein_function/scripts/run_nma_pca.py \
+    --pdb_dir      /mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling/A0A010/clustering.nodes_pipeline_v1 \
+    --output_dir   /mnt/research/woldring_lab/TopoFormer-MF/nma_pca/A0A010 \
+    --n_conformers 10 \
+    --n_slow_modes 3 \
+    --n_pcs        2 \
+    --gnm_cutoff   7.5
 ```
 
-Expected outputs in `nma_pca/P12345/`:
+Expected outputs in `/mnt/research/woldring_lab/TopoFormer-MF/nma_pca/A0A010/`:
 
 ```
-anm_gnm_results.npz    ← gnm_flucts_mean [N_modes, N_residues], resids [N_residues]
+anm_gnm_results.npz    ← gnm_flucts_mean [n_slow_modes, N_residues], resids [N_residues]
 pca_results.npz        ← pc1_profile [N_residues], pc2_profile [N_residues], resids
 ```
 
-### Batch on HPCC (CPU array job)
+### Batch on HPCC (SLURM array job)
+
+The launcher reads `datasets/all_ids.txt` and submits a chunked array job (5 proteins
+per task → ~489 tasks for 2,441 proteins), staying within SLURM QOS limits:
 
 ```bash
-ls /mnt/research/woldring_lab/TopoFormer-MF/datasets/pdbs > /tmp/all_protein_ids.txt
-
-sbatch --array=1-$(wc -l < /tmp/all_protein_ids.txt) sbatch_nma_pca.sh
+bash protein_function/scripts/submit_nma_pca.sh
+# Prints: "Submitting NMA-PCA array job for 2441 proteins as 489 tasks (CHUNK_SIZE=5) ..."
 ```
 
-Where `sbatch_nma_pca.sh` contains:
-
+Monitor with:
 ```bash
-#!/bin/bash --login
-#SBATCH --job-name=nma_pca
-#SBATCH --time=04:00:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --output=/mnt/scratch/%u/topoformer_mf/logs/nma_pca_%A_%a.out
-
-module purge
-module load Miniforge3
-conda activate topoformer_mf
-
-PID=$(sed -n "${SLURM_ARRAY_TASK_ID}p" /tmp/all_protein_ids.txt)
-python /mnt/research/woldring_lab/Ensemble_NMA-PCA/run_nma_pca.py \
-    --pdb_dir    /mnt/research/woldring_lab/TopoFormer-MF/datasets/pdbs/$PID \
-    --output_dir /mnt/research/woldring_lab/TopoFormer-MF/datasets/nma_pca/$PID \
-    --n_modes    10 --n_pcs 5
+squeue -u $USER
+# Check a task log:
+tail -f /mnt/research/woldring_lab/TopoFormer-MF/logs/nma_pca_<JOBID>_1.out
 ```
 
 ### QA check
@@ -355,8 +348,8 @@ python /mnt/research/woldring_lab/Ensemble_NMA-PCA/run_nma_pca.py \
 ```bash
 python - <<'PY'
 import os, numpy as np
-nma_dir = '/mnt/research/woldring_lab/TopoFormer-MF/datasets/nma_pca'
-proteins = os.listdir(nma_dir)
+nma_dir = '/mnt/research/woldring_lab/TopoFormer-MF/nma_pca'
+proteins = [d for d in os.listdir(nma_dir) if os.path.isdir(os.path.join(nma_dir, d))]
 ok, missing_gnm, missing_pca = 0, [], []
 for pid in proteins:
     d = os.path.join(nma_dir, pid)
@@ -383,24 +376,25 @@ Topology extraction is CPU-intensive and deterministic. Precompute once; reuse e
 
 For each protein: one `.npy` file of shape **`(12, 200, 121)`** (ensemble motion mode).
 
-### Run command
+### Run command (SLURM array job — recommended)
+
+Topology extraction is CPU-intensive (O(N³) eigenvalue computation). Use the array
+job launcher to spread work across multiple cluster nodes:
 
 ```bash
-python protein_function/scripts/precompute_topo_features.py \
-    --mode              ensemble_motion \
-    --pdb_dir           /mnt/research/woldring_lab/TopoFormer-MF/datasets/pdbs \
-    --nma_pca_dir       /mnt/research/woldring_lab/TopoFormer-MF/datasets/nma_pca \
-    --output_dir        /mnt/scratch/$USER/topoformer_mf/topo_features \
-    --pdb_list          /mnt/research/woldring_lab/TopoFormer-MF/datasets/all_ids.txt \
-    --n_conformers      10 \
-    --top_motion_pct    0.20 \
-    --fluctuation_sources gnm pca \
-    --n_slow_modes      3 \
-    --dis_start         0.0 \
-    --dis_cutoff        20.0 \
-    --dis_step          0.1 \
-    --ensemble_aggregation mean_std \
-    --n_workers         16
+bash protein_function/scripts/submit_topo_features.sh
+# Prints: "Submitting topo-features array job for 2441 proteins as 489 tasks (CHUNK_SIZE=5) ..."
+```
+
+Each task processes 5 proteins in parallel on 5 CPUs. The job reads paths from
+`sbatch_topo_features_array.sh`:
+- PDB ensembles: `/mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling`
+- NMA-PCA profiles: `/mnt/research/woldring_lab/TopoFormer-MF/nma_pca`
+- Output: `/mnt/research/woldring_lab/TopoFormer-MF/topo_features`
+
+To scale to larger datasets (e.g. 50k proteins), increase CHUNK_SIZE:
+```bash
+CHUNK_SIZE=20 bash protein_function/scripts/submit_topo_features.sh
 ```
 
 ### Key arguments
@@ -417,47 +411,12 @@ python protein_function/scripts/precompute_topo_features.py \
 | `--ensemble_aggregation` | `mean_std` | `mean_std` → 12 channels; `mean_only` → 6 channels |
 | `--overwrite` | False | Re-compute even if output file exists |
 
-### Recommended HPCC batch script
-
-Save as `sbatch_topology_precompute.sh`:
-
-```bash
-#!/bin/bash --login
-#SBATCH --job-name=mf_topo_precompute
-#SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --output=/mnt/scratch/%u/topoformer_mf/logs/%x_%j.out
-#SBATCH --error=/mnt/scratch/%u/topoformer_mf/logs/%x_%j.err
-
-set -euo pipefail
-module purge
-module load Miniforge3
-conda activate topoformer_mf
-
-mkdir -p /mnt/scratch/$USER/topoformer_mf/logs
-mkdir -p /mnt/scratch/$USER/topoformer_mf/topo_features
-
-python /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer/protein_function/scripts/precompute_topo_features.py \
-    --mode              ensemble_motion \
-    --pdb_dir           /mnt/research/woldring_lab/TopoFormer-MF/datasets/pdbs \
-    --nma_pca_dir       /mnt/research/woldring_lab/TopoFormer-MF/datasets/nma_pca \
-    --output_dir        /mnt/scratch/$USER/topoformer_mf/topo_features \
-    --pdb_list          /mnt/research/woldring_lab/TopoFormer-MF/datasets/all_ids.txt \
-    --n_conformers      10 \
-    --top_motion_pct    0.20 \
-    --fluctuation_sources gnm pca \
-    --n_slow_modes      3 \
-    --ensemble_aggregation mean_std \
-    --n_workers         16
-```
-
 ### QA check
 
 ```bash
 python - <<'PY'
 import os, numpy as np
-feat_dir = '/mnt/scratch/$USER/topoformer_mf/topo_features'
+feat_dir = '/mnt/research/woldring_lab/TopoFormer-MF/topo_features'
 files = [f for f in os.listdir(feat_dir) if f.endswith('.npy')]
 print(f'n_files: {len(files)}')
 bad = []
@@ -470,10 +429,6 @@ for f in files:
 print(f'Bad files: {len(bad)}')
 for b in bad[:10]:
     print(' ', b)
-# Sample a few OK files
-for f in files[:3]:
-    arr = np.load(os.path.join(feat_dir, f))
-    print(f, arr.shape, arr.dtype, 'min', arr.min(), 'max', arr.max())
 PY
 ```
 
@@ -492,52 +447,29 @@ These models are GPU-expensive. Precompute once and reuse.
 | ESM-2 650M | `facebook/esm2_t33_650M_UR50D` | **1280** |
 | ProtTrans T5 | `Rostlab/prot_t5_xl_uniref50` | **1024** |
 
-### Run command
+### Run command (HPCC — use the provided sbatch script)
 
 ```bash
-python protein_function/scripts/precompute_seq_features.py \
-    --fasta_file        /mnt/research/woldring_lab/TopoFormer-MF/datasets/sequences.fasta \
-    --esm_output_dir    /mnt/scratch/$USER/topoformer_mf/esm_features \
-    --prottrans_output_dir /mnt/scratch/$USER/topoformer_mf/prottrans_features \
-    --esm_model         facebook/esm2_t33_650M_UR50D \
-    --pt_model          Rostlab/prot_t5_xl_uniref50 \
-    --batch_size        16 \
-    --device            cuda
+sbatch protein_function/scripts/sbatch_seq_features.sh
 ```
 
-### Recommended HPCC batch script
+This script (1 GPU, 8 CPUs, 64 GB, 8h) handles:
+- PATH activation for the conda environment
+- HuggingFace model cache redirected to node-local `$TMPDIR` (avoids slow networked I/O)
+- Reads from `datasets/sequences.fasta`
+- Writes to `/mnt/research/woldring_lab/TopoFormer-MF/esm_features/` and `prottrans_features/`
 
-Save as `sbatch_seq_precompute.sh`:
-
+Manual invocation (for testing):
 ```bash
-#!/bin/bash --login
-#SBATCH --job-name=mf_seq_precompute
-#SBATCH --time=24:00:00
-#SBATCH --gpus=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --output=/mnt/scratch/%u/topoformer_mf/logs/%x_%j.out
-#SBATCH --error=/mnt/scratch/%u/topoformer_mf/logs/%x_%j.err
-
-set -euo pipefail
-module purge
-module load Miniforge3
-conda activate topoformer_mf
-
-mkdir -p /mnt/scratch/$USER/topoformer_mf/{logs,esm_features,prottrans_features}
-
-JOB_TMP=${TMPDIR:-/tmp/$USER/topoformer_mf_$SLURM_JOB_ID}
-mkdir -p "$JOB_TMP"
-export HF_HOME="$JOB_TMP/hf"
-export TRANSFORMERS_CACHE="$JOB_TMP/hf/transformers"
-export HUGGINGFACE_HUB_CACHE="$JOB_TMP/hf/hub"
-
-python /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer/protein_function/scripts/precompute_seq_features.py \
-    --fasta_file        /mnt/research/woldring_lab/TopoFormer-MF/datasets/sequences.fasta \
-    --esm_output_dir    /mnt/scratch/$USER/topoformer_mf/esm_features \
-    --prottrans_output_dir /mnt/scratch/$USER/topoformer_mf/prottrans_features \
-    --batch_size        16 \
-    --device            cuda
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
+python protein_function/scripts/precompute_seq_features.py \
+    --fasta_file           /mnt/research/woldring_lab/TopoFormer-MF/datasets/sequences.fasta \
+    --esm_output_dir       /mnt/research/woldring_lab/TopoFormer-MF/esm_features \
+    --prottrans_output_dir /mnt/research/woldring_lab/TopoFormer-MF/prottrans_features \
+    --esm_model            facebook/esm2_t33_650M_UR50D \
+    --prottrans_model      Rostlab/prot_t5_xl_uniref50 \
+    --batch_size           8 \
+    --device               cuda
 ```
 
 ### QA check
@@ -545,12 +477,14 @@ python /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer/protein_function/scri
 ```bash
 python - <<'PY'
 import os, numpy as np
-for d, expected_dim in [('esm_features', 1280), ('prottrans_features', 1024)]:
-    base = f'/mnt/scratch/$USER/topoformer_mf/{d}'
-    files = sorted([f for f in os.listdir(base) if f.endswith('.npy')])
-    bad = [(f, np.load(os.path.join(base, f)).shape)
-           for f in files if np.load(os.path.join(base, f)).shape != (expected_dim,)]
-    print(f'{d}: {len(files)} files, {len(bad)} wrong-shape')
+for d, expected_dim in [
+    ('/mnt/research/woldring_lab/TopoFormer-MF/esm_features',       1280),
+    ('/mnt/research/woldring_lab/TopoFormer-MF/prottrans_features', 1024),
+]:
+    files = sorted([f for f in os.listdir(d) if f.endswith('.npy')])
+    bad = [(f, np.load(os.path.join(d, f)).shape)
+           for f in files if np.load(os.path.join(d, f)).shape != (expected_dim,)]
+    print(f'{os.path.basename(d)}: {len(files)} files, {len(bad)} wrong-shape')
     for b in bad[:5]:
         print(' ', b)
 PY
@@ -575,14 +509,14 @@ PY
 
 ```bash
 python protein_function/training/train_mf_prediction.py \
-    --topo_dir          /mnt/scratch/$USER/topoformer_mf/topo_features \
-    --esm_dir           /mnt/scratch/$USER/topoformer_mf/esm_features \
-    --prottrans_dir     /mnt/scratch/$USER/topoformer_mf/prottrans_features \
+    --topo_dir          /mnt/research/woldring_lab/TopoFormer-MF/topo_features \
+    --esm_dir           /mnt/research/woldring_lab/TopoFormer-MF/esm_features \
+    --prottrans_dir     /mnt/research/woldring_lab/TopoFormer-MF/prottrans_features \
     --label_file        /mnt/research/woldring_lab/TopoFormer-MF/datasets/mf_annotations.tsv \
     --train_ids_file    /mnt/research/woldring_lab/TopoFormer-MF/datasets/train_ids.txt \
     --val_ids_file      /mnt/research/woldring_lab/TopoFormer-MF/datasets/val_ids.txt \
     --topo_feature_mode ensemble_motion \
-    --output_dir        ./runs/mf_model_run1 \
+    --output_dir        /mnt/research/woldring_lab/TopoFormer-MF/runs/mf_model_run1 \
     --num_train_epochs  50 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size  64 \
@@ -606,23 +540,21 @@ Save as `sbatch_train_mf.sh`:
 #SBATCH --error=/mnt/scratch/%u/topoformer_mf/logs/%x_%j.err
 
 set -euo pipefail
-module purge
-module load Miniforge3
-conda activate topoformer_mf
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
 
-mkdir -p /mnt/scratch/$USER/topoformer_mf/logs
+mkdir -p /mnt/research/woldring_lab/TopoFormer-MF/logs
 mkdir -p /mnt/research/woldring_lab/TopoFormer-MF/runs
 
-JOB_TMP=${TMPDIR:-/tmp/$USER/topoformer_mf_$SLURM_JOB_ID}
+JOB_TMP=${TMPDIR:-/tmp/woldring_mf_${SLURM_JOB_ID}}
 mkdir -p "$JOB_TMP"
 export HF_HOME="$JOB_TMP/hf"
 export TRANSFORMERS_CACHE="$JOB_TMP/hf/transformers"
 export HUGGINGFACE_HUB_CACHE="$JOB_TMP/hf/hub"
 
 python /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer/protein_function/training/train_mf_prediction.py \
-    --topo_dir          /mnt/scratch/$USER/topoformer_mf/topo_features \
-    --esm_dir           /mnt/scratch/$USER/topoformer_mf/esm_features \
-    --prottrans_dir     /mnt/scratch/$USER/topoformer_mf/prottrans_features \
+    --topo_dir          /mnt/research/woldring_lab/TopoFormer-MF/topo_features \
+    --esm_dir           /mnt/research/woldring_lab/TopoFormer-MF/esm_features \
+    --prottrans_dir     /mnt/research/woldring_lab/TopoFormer-MF/prottrans_features \
     --label_file        /mnt/research/woldring_lab/TopoFormer-MF/datasets/mf_annotations.tsv \
     --train_ids_file    /mnt/research/woldring_lab/TopoFormer-MF/datasets/train_ids.txt \
     --val_ids_file      /mnt/research/woldring_lab/TopoFormer-MF/datasets/val_ids.txt \
