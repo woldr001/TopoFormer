@@ -434,6 +434,194 @@ PY
 
 ---
 
+## Step 3B: Configuration C — Aggressive Speedup (Recommended for large datasets)
+
+The default configuration in Step 3 produces `[12, 200, 121]` tensors and takes
+roughly **1–4 hours per protein** for large structures. For datasets of ≥10k proteins
+this is impractical. Configuration C reduces wall time by ~100–200× while preserving
+the most informative structural information.
+
+### What changes
+
+| Parameter | Default (Step 3) | Aggressive (Step 3B) |
+|-----------|-----------------|----------------------|
+| `--motion_field` | None (all atoms) | **10.0 Å** — static atoms within 10 Å of motion atoms only |
+| `--combo_set` | `full` (11×11 = 121) | **`reduced`** (7×7 = 49, drops S-specific combos) |
+| `--dis_step` | 0.1 Å → 200 steps | **0.2 Å → 75 steps** |
+| `--dis_cutoff` | 20.0 Å | **15.0 Å** |
+| `--n_conformers` | 10 | **5** (most diverse from pool of 10) |
+| `--diverse_conformers` | off | **on** — greedy Cα RMSD maximin selection |
+| `--max_conformers_pool` | 10 | **10** |
+| Wall time per task (5 proteins) | ~12h | **~2–4h** |
+| **Output shape** | `[12, 200, 121]` | **`[12, 75, 49]`** |
+
+### Why each change reduces computation
+
+- **`--motion_field 10.0`**: Limits static atom set to the local neighbourhood of the
+  motion residues (~600 atoms vs ~2100 for a 300-residue protein). Eigenvalue computation
+  is O(N³), so this gives a ~37× speedup.
+- **`--combo_set reduced`**: 7×7 = 49 element combos instead of 11×11 = 121 → 2.5×
+  fewer Laplacian computations. Sulfur-specific combos (which are sparse in most proteins)
+  are dropped; the catch-all `(C, N, O, S)` combo still captures sulfur contributions.
+- **Coarser filtration** (`--dis_step 0.2`, `--dis_cutoff 15.0`): 75 steps instead of
+  200 → 2.7× fewer per-step eigenvalue queries. Most functional topology signal appears
+  at medium distances (3–15 Å).
+- **5 diverse conformers**: Uses the 5 conformers most representative of the ensemble's
+  structural diversity (farthest-point sampling on Cα RMSD), rather than 10 sequential
+  conformers. Reduces per-protein cost by 2× while retaining the most distinct geometries.
+
+### Conformer diversity selection
+
+When `--diverse_conformers` is set, the pipeline:
+1. Loads the Cα coordinates from all `max_conformers_pool` conformers
+2. Centroid-aligns each conformation
+3. Runs greedy maximin: starts with conformer 0, iteratively adds the conformer
+   farthest from the current selection (measured by Cα RMSD)
+4. Returns the `n_conformers` most structurally diverse PDB files
+
+This ensures the 5 selected conformers span the conformational space as widely as
+possible, preserving maximum ensemble information.
+
+### Output tensor shape
+
+```
+[12, 75, 49]
+ │    │   │
+ │    │   └── element-pair combination index  (7 motion × 7 static = 49)
+ │    └─────── filtration distance step        (0.0 → 14.8 Å, 75 steps of 0.2 Å)
+ └──────────── channel                         (6 spectral stats × mean + 6 × std = 12)
+```
+
+### Workflow for Configuration C (re-run from preprocess step)
+
+#### 1. Re-run preprocessing with expanded protein ensembles
+
+If new ensembles have been added to the sampling directory:
+
+```bash
+cd /mnt/research/woldring_lab/TopoFormer-MF/TopoFormer
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
+
+python protein_function/scripts/preprocess_training_data.py \
+    --sampling_dir  /mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling \
+    --annotation_file /mnt/research/woldring_lab/TopoFormer-MF/raw/annotations.tsv \
+    --fasta_file    /mnt/research/woldring_lab/TopoFormer-MF/raw/sequences.fasta \
+    --output_dir    /mnt/research/woldring_lab/TopoFormer-MF/datasets \
+    --overwrite
+```
+
+Verify output:
+```bash
+wc -l /mnt/research/woldring_lab/TopoFormer-MF/datasets/all_ids.txt
+# Confirm N has increased from 2,441
+cat /mnt/research/woldring_lab/TopoFormer-MF/datasets/manifest.csv | head -5
+```
+
+#### 2. Run NMA-PCA for any new proteins
+
+```bash
+# NMA-PCA profiles for proteins already processed are skipped automatically (no --overwrite).
+bash protein_function/scripts/submit_nma_pca.sh
+```
+
+Verify:
+```bash
+python - <<'PY'
+import os
+nma = '/mnt/research/woldring_lab/TopoFormer-MF/nma_pca'
+ids_file = '/mnt/research/woldring_lab/TopoFormer-MF/datasets/all_ids.txt'
+ids = open(ids_file).read().split()
+missing = [p for p in ids if not os.path.exists(os.path.join(nma, p, 'anm_gnm_results.npz'))]
+print(f'NMA-PCA missing for {len(missing)} / {len(ids)} proteins')
+PY
+```
+
+#### 3. Run Configuration C topology feature extraction
+
+```bash
+bash protein_function/scripts/submit_topo_features_fast.sh
+# Submits fast array job (4h wall time, 20 GB, 5 CPUs per task)
+# Output: /mnt/research/woldring_lab/TopoFormer-MF/topo_features_fast/
+```
+
+Monitor:
+```bash
+squeue -u $USER
+# Parse log status:
+python protein_function/scripts/parse_topo_logs.py \
+    --log_dir /mnt/research/woldring_lab/TopoFormer-MF/logs \
+    --job_id  <JOBID>
+```
+
+Verify output shape is `(12, 75, 49)`:
+```bash
+python - <<'PY'
+import os, numpy as np
+feat_dir = '/mnt/research/woldring_lab/TopoFormer-MF/topo_features_fast'
+files = [f for f in os.listdir(feat_dir) if f.endswith('.npy')]
+print(f'n_files: {len(files)}')
+bad = []
+for f in files:
+    arr = np.load(os.path.join(feat_dir, f))
+    if arr.shape != (12, 75, 49):
+        bad.append((f, arr.shape))
+    elif not np.isfinite(arr).all():
+        bad.append((f, 'has inf/nan'))
+print(f'Bad files: {len(bad)}')
+for b in bad[:10]: print(' ', b)
+PY
+```
+
+#### 4. Run sequence feature extraction (same as Step 4 below)
+
+Use the same `sbatch_seq_features.sh` — output directories remain unchanged.
+If sequence features already exist for the original 2,441 proteins, run with
+`--skip_existing` (or equivalently, the script skips existing `.npy` files
+automatically). New proteins added since the last run will be processed.
+
+#### 5. Train with Configuration C features
+
+When training with the fast features, pass the correct topology directory and
+note that the input shape changes to `[12, 75, 49]`:
+
+```bash
+python protein_function/training/train_mf_prediction.py \
+    --topo_dir          /mnt/research/woldring_lab/TopoFormer-MF/topo_features_fast \
+    --esm_dir           /mnt/research/woldring_lab/TopoFormer-MF/esm_features \
+    --prottrans_dir     /mnt/research/woldring_lab/TopoFormer-MF/prottrans_features \
+    --label_file        /mnt/research/woldring_lab/TopoFormer-MF/datasets/mf_annotations.tsv \
+    --train_ids_file    /mnt/research/woldring_lab/TopoFormer-MF/datasets/train_ids.txt \
+    --val_ids_file      /mnt/research/woldring_lab/TopoFormer-MF/datasets/val_ids.txt \
+    --topo_feature_mode ensemble_motion \
+    --output_dir        /mnt/research/woldring_lab/TopoFormer-MF/runs/mf_model_fast_run1 \
+    --num_train_epochs  50 \
+    --per_device_train_batch_size 32 \
+    --per_device_eval_batch_size  64 \
+    --learning_rate     1e-4 \
+    --warmup_ratio      0.05 \
+    --weight_decay      0.01
+```
+
+> **Note**: The model config is automatically inferred from the topology feature shape
+> at training time. No code change is needed — the `mini_topt_config.py` adapts to
+> the input dimensions. Keep the `topo_features_fast/` and `topo_features/`
+> directories separate so you can ablate both configurations.
+
+### Evaluating Configuration C vs. default
+
+After training both configurations, compare:
+
+| Metric | Default `[12, 200, 121]` | Config C `[12, 75, 49]` |
+|--------|------------------------|------------------------|
+| Val Fmax | *(your result)* | *(your result)* |
+| Val AUPR | *(your result)* | *(your result)* |
+| Feature computation time | ~1–4h/protein | ~2–5 min/protein |
+
+If the Fmax gap is ≤ 0.02–0.03, Configuration C is preferred for production use
+and large-scale screening.
+
+---
+
 ## Step 4: Pre-compute sequence embeddings (ESM-2 + ProtTrans)
 
 ### Why precompute
@@ -688,7 +876,8 @@ python protein_function/predict.py \
 
 ### Feature checks
 
-- [ ] topology `.npy` arrays have shape `(12, 200, 121)`
+- [ ] topology `.npy` arrays have shape `(12, 200, 121)` (default) or `(12, 75, 49)` (Config C)
+- [ ] all topology files in a given training run have the **same** shape (do not mix)
 - [ ] no topology arrays contain `inf` or `NaN`
 - [ ] ESM `.npy` arrays have shape `(1280,)`
 - [ ] ProtTrans `.npy` arrays have shape `(1024,)`
@@ -711,6 +900,7 @@ python protein_function/predict.py \
 | Topology all zeros | PDB has only `HETATM`, no `ATOM` records | Use standard protein PDB format |
 | Wrong topo shape `(6, 200, 15)` | Ran `--mode protein_only` instead of `ensemble_motion` | Rerun with `--mode ensemble_motion` |
 | Shape mismatch during training | Mixing `protein_only` and `ensemble_motion` `.npy` files | Keep feature directories separate per mode |
+| Shape mismatch `(12, 200, 121)` vs `(12, 75, 49)` | Mixed default and Config C features | Use separate `topo_features/` and `topo_features_fast/` directories |
 | MISSING\_PDB warning | PDB directory not found or no `.pdb` files in it | Check naming: `pdbs/<protein_id>/conformation.pdb` |
 | Warning: "No motion profiles found" | NMA-PCA files absent; falls back to all-residue topology | Run NMA-PCA pipeline; extractor still works but loses motion-guidance |
 | `transformers` import error | Newer transformers installed | `pip install "transformers==4.24.0"` |

@@ -22,10 +22,12 @@ residues) is spatially embedded within its context (protein pocket / static resi
 
 Output shape
 ------------
-``[12, n_filtrations, 121]`` float32 per protein, where:
+``[12, n_filtrations, n_combos]`` float32 per protein, where:
 - **12**  = 6 spectral statistics × 2 ensemble aggregations (mean + std)
-- **n_filtrations** = ``int((dis_cutoff - dis_start) / dis_step)`` — default 200
-- **121** = 11 motion-side element combos × 11 static-side element combos
+- **n_filtrations** = ``int((dis_cutoff - dis_start) / dis_step)``
+  — default 200 (full config) or 75 (aggressive: dis_step=0.2, dis_cutoff=15)
+- **n_combos** = 121 for ``combo_set='full'`` (11×11, C/N/O/S + pairs)
+               or 49 for ``combo_set='reduced'`` (7×7, drops S-specific pairs)
 
 Inputs required
 ---------------
@@ -96,6 +98,20 @@ MOTION_SIDE_COMBINATIONS = [
 ]  # 11 combos
 
 STATIC_SIDE_COMBINATIONS = MOTION_SIDE_COMBINATIONS  # same 11 combos
+
+# Reduced combo set: drops all sulfur-specific combinations → 7 × 7 = 49
+# Use with --combo_set reduced (Configuration C / aggressive speedup).
+REDUCED_MOTION_COMBINATIONS = [
+    ("C",),
+    ("N",),
+    ("O",),
+    ("C", "N"),
+    ("C", "O"),
+    ("N", "O"),
+    ("C", "N", "O", "S"),
+]  # 7 combos — S still captured in the catch-all entry
+
+REDUCED_STATIC_COMBINATIONS = REDUCED_MOTION_COMBINATIONS  # same 7 combos
 
 NUM_MOTION_COMBOS  = len(MOTION_SIDE_COMBINATIONS)    # 11
 NUM_STATIC_COMBOS  = len(STATIC_SIDE_COMBINATIONS)    # 11
@@ -168,6 +184,96 @@ def get_protein_atoms_with_resnum(
         np.array(coords, dtype=np.float64),
         np.array(resnums, dtype=int),
     )
+
+
+# ---------------------------------------------------------------------------
+# Cα parser and diverse conformer selection
+# ---------------------------------------------------------------------------
+
+def _parse_calpha_coords(pdb_file: str) -> np.ndarray:
+    """Return Cα coordinates from a PDB file, one row per unique residue number.
+
+    Returns:
+        Array of shape [N_residues, 3], or empty (0, 3) array on failure.
+    """
+    coords: List[List[float]] = []
+    resids_seen: set = set()
+    try:
+        with open(pdb_file) as fh:
+            for line in fh:
+                if not line.startswith("ATOM"):
+                    continue
+                if line[12:16].strip() != "CA":
+                    continue
+                try:
+                    resnum = int(line[22:26].strip())
+                except ValueError:
+                    continue
+                if resnum in resids_seen:
+                    continue
+                resids_seen.add(resnum)
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    coords.append([x, y, z])
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return np.array(coords, dtype=np.float64) if coords else np.empty((0, 3))
+
+
+def select_diverse_conformers(pdb_files: List[str], n_select: int) -> List[str]:
+    """Select the N most structurally diverse conformers using greedy maximin RMSD.
+
+    Aligns each conformation to its own Cα centroid then picks the first
+    conformation arbitrarily and iteratively adds the one farthest from the
+    already-selected set (farthest-point / maximin sampling on Cα RMSD).
+
+    Args:
+        pdb_files: Candidate PDB file paths.
+        n_select: Number of conformers to select.
+
+    Returns:
+        List of up to n_select selected file paths in selection order.
+        Returns pdb_files unchanged if already ≤ n_select.
+    """
+    if len(pdb_files) <= n_select:
+        return list(pdb_files)
+
+    coords_list: List[np.ndarray] = []
+    valid_files: List[str] = []
+    for pf in pdb_files:
+        ca = _parse_calpha_coords(pf)
+        if len(ca) > 0:
+            coords_list.append(ca)
+            valid_files.append(pf)
+
+    if len(valid_files) <= n_select:
+        return valid_files
+
+    # Truncate to the shortest chain length so all vectors have equal dimension
+    min_res = min(len(c) for c in coords_list)
+    # Centroid-align and flatten to 1-D vectors
+    vecs = np.array(
+        [(c[:min_res] - c[:min_res].mean(axis=0)).ravel() for c in coords_list],
+        dtype=np.float64,
+    )
+
+    # Pairwise RMSD (use Euclidean on flattened, normalise by sqrt(min_res))
+    pairwise = cdist(vecs, vecs, metric="euclidean") / np.sqrt(min_res)
+
+    selected_idx = [0]
+    remaining = list(range(1, len(valid_files)))
+    while len(selected_idx) < n_select and remaining:
+        # For each remaining candidate, find its min distance to any selected
+        min_dists = pairwise[np.ix_(remaining, selected_idx)].min(axis=1)
+        best_local = int(np.argmax(min_dists))
+        selected_idx.append(remaining[best_local])
+        remaining.pop(best_local)
+
+    return [valid_files[i] for i in selected_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +471,10 @@ def _extract_single_conformation_features(
     motion_field: Optional[float],
     scl: SimplicialComplex_laplacian.SimplicialComplexLaplacian,
     sentinel_cutoff: float = 1000.0,
+    motion_combos: Optional[List] = None,
+    static_combos: Optional[List] = None,
 ) -> np.ndarray:
-    """Extract [6, n_filtrations, 121] features for one PDB conformation.
+    """Extract [6, n_filtrations, n_combos] features for one PDB conformation.
 
     Args:
         pdb_file: Path to one PDB conformation.
@@ -376,12 +484,23 @@ def _extract_single_conformation_features(
             of any motion atom (analogous to consider_field in original code).
         scl: Reusable SimplicialComplexLaplacian instance.
         sentinel_cutoff: Passed to generate_motion_cross_distance_matrix.
+        motion_combos: Element combination list for motion side. Defaults to
+            MOTION_SIDE_COMBINATIONS (11 combos, full set).
+        static_combos: Element combination list for static side. Defaults to
+            STATIC_SIDE_COMBINATIONS (11 combos, full set).
 
     Returns:
-        Feature array of shape [6, n_filtrations, 121] as float32.
+        Feature array of shape [6, n_filtrations, n_combos] as float32, where
+        n_combos = len(motion_combos) * len(static_combos).
     """
+    if motion_combos is None:
+        motion_combos = MOTION_SIDE_COMBINATIONS
+    if static_combos is None:
+        static_combos = STATIC_SIDE_COMBINATIONS
+    n_combos = len(motion_combos) * len(static_combos)
+
     n_filtrations  = len(filtration)
-    feature_array  = np.zeros([NUM_STATISTICS, n_filtrations, NUM_COMBINATIONS],
+    feature_array  = np.zeros([NUM_STATISTICS, n_filtrations, n_combos],
                                dtype=np.float32)
 
     # Parse atoms
@@ -408,12 +527,12 @@ def _extract_single_conformation_features(
         return feature_array
 
     combo_idx = 0
-    for m_combo in MOTION_SIDE_COMBINATIONS:
+    for m_combo in motion_combos:
         # Select motion atoms matching this element combination
         m_mask = np.array([e in m_combo for e in motion_ele])
         sel_motion_xyz = motion_xyz[m_mask]
 
-        for s_combo in STATIC_SIDE_COMBINATIONS:
+        for s_combo in static_combos:
             # Select static atoms matching this element combination
             s_mask = np.array([e in s_combo for e in static_ele])
             sel_static_xyz = static_xyz[s_mask]
@@ -476,6 +595,7 @@ def generate_ensemble_motion_lap_features(
     dis_cutoff: float = 20.0,
     dis_step: float = 0.1,
     ensemble_aggregation: str = "mean_std",
+    combo_set: str = "full",
     print_progress: bool = True,
 ) -> np.ndarray:
     """Extract motion-guided ensemble topology features for a protein.
@@ -484,8 +604,8 @@ def generate_ensemble_motion_lap_features(
       1. Load GNM/ANM/PCA per-residue motion scores from NMA-PCA outputs.
       2. Identify top-motion residue numbers.
       3. For each PDB conformation, compute cross-pair Persistent Laplacian
-         features (motion atoms ↔ static atoms) → [6, n_filt, 121].
-      4. Aggregate across conformations: mean + std → [12, n_filt, 121].
+         features (motion atoms ↔ static atoms) → [6, n_filt, n_combos].
+      4. Aggregate across conformations: mean + std → [12, n_filt, n_combos].
       5. Save as ``<output_folder>/<output_feature_name>.npy``.
 
     Args:
@@ -510,15 +630,27 @@ def generate_ensemble_motion_lap_features(
             - ``'mean_only'``: average only → 6 channels
             - ``'all'``: concatenate all conformations along channel axis
               → 6*N_conformers channels (use only for small ensembles)
+        combo_set: Element combination scheme:
+            - ``'full'`` (default): 11×11 = 121 combos (C, N, O, S + all pairs)
+            - ``'reduced'``: 7×7 = 49 combos (drops all S-specific combos)
         print_progress: Whether to print per-step progress.
 
     Returns:
-        Feature array of shape [C, n_filtrations, 121] as float32, where C
-        depends on ensemble_aggregation (12 for mean_std, 6 for mean_only).
+        Feature array of shape [C, n_filtrations, n_combos] as float32, where C
+        depends on ensemble_aggregation (12 for mean_std, 6 for mean_only) and
+        n_combos is 121 for full or 49 for reduced.
         Also saved as ``<output_folder>/<output_feature_name>.npy``.
     """
     if fluctuation_sources is None:
         fluctuation_sources = ["gnm", "pca"]
+
+    if combo_set == "reduced":
+        motion_combos = REDUCED_MOTION_COMBINATIONS
+        static_combos = REDUCED_STATIC_COMBINATIONS
+    else:
+        motion_combos = MOTION_SIDE_COMBINATIONS
+        static_combos = STATIC_SIDE_COMBINATIONS
+    n_combos = len(motion_combos) * len(static_combos)
 
     if not pdb_files:
         raise ValueError("pdb_files must be a non-empty list.")
@@ -569,25 +701,27 @@ def generate_ensemble_motion_lap_features(
             filtration=filtration,
             motion_field=motion_field,
             scl=scl,
+            motion_combos=motion_combos,
+            static_combos=static_combos,
         )
         per_conf_features.append(feat)
 
-    # per_conf_features: list of [6, n_filt, 121] arrays
-    conf_stack = np.stack(per_conf_features, axis=0)  # [N_conf, 6, n_filt, 121]
+    # per_conf_features: list of [6, n_filt, n_combos] arrays
+    conf_stack = np.stack(per_conf_features, axis=0)  # [N_conf, 6, n_filt, n_combos]
 
     # ------------------------------------------------------------------
     # 4. Ensemble aggregation
     # ------------------------------------------------------------------
     if ensemble_aggregation == "mean_std":
-        mean_feat = conf_stack.mean(axis=0)                 # [6, n_filt, 121]
-        std_feat  = conf_stack.std(axis=0)                  # [6, n_filt, 121]
-        output    = np.concatenate([mean_feat, std_feat], axis=0)  # [12, n_filt, 121]
+        mean_feat = conf_stack.mean(axis=0)                 # [6, n_filt, n_combos]
+        std_feat  = conf_stack.std(axis=0)                  # [6, n_filt, n_combos]
+        output    = np.concatenate([mean_feat, std_feat], axis=0)  # [12, n_filt, n_combos]
     elif ensemble_aggregation == "mean_only":
-        output = conf_stack.mean(axis=0)                    # [6, n_filt, 121]
+        output = conf_stack.mean(axis=0)                    # [6, n_filt, n_combos]
     elif ensemble_aggregation == "all":
-        # [N_conf, 6, n_filt, 121] → [N_conf*6, n_filt, 121]
+        # [N_conf, 6, n_filt, n_combos] → [N_conf*6, n_filt, n_combos]
         N = conf_stack.shape[0]
-        output = conf_stack.reshape(N * NUM_STATISTICS, n_filtrations, NUM_COMBINATIONS)
+        output = conf_stack.reshape(N * NUM_STATISTICS, n_filtrations, n_combos)
     else:
         raise ValueError(f"Unknown ensemble_aggregation: {ensemble_aggregation!r}. "
                          "Choose 'mean_std', 'mean_only', or 'all'.")
@@ -689,6 +823,9 @@ def _parse_args(argv):
     parser.add_argument("--dis_step",    type=float, default=0.1)
     parser.add_argument("--ensemble_aggregation", default="mean_std",
                         choices=["mean_std", "mean_only", "all"])
+    parser.add_argument("--combo_set", default="full", choices=["full", "reduced"],
+                        help="Element combination scheme: 'full' = 11×11=121 combos "
+                             "(default), 'reduced' = 7×7=49 combos (no S-specific pairs).")
     return parser.parse_args(argv)
 
 
@@ -719,6 +856,7 @@ def main():
         dis_cutoff=args.dis_cutoff,
         dis_step=args.dis_step,
         ensemble_aggregation=args.ensemble_aggregation,
+        combo_set=args.combo_set,
         print_progress=True,
     )
     print(f"[topo] Finished in {time.time() - t0:.1f}s")

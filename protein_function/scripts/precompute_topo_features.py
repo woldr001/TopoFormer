@@ -55,6 +55,7 @@ from protein_function.topo_extraction.protein_only_topo_embedding import (
 from protein_function.topo_extraction.ensemble_motion_topo_embedding import (
     generate_ensemble_motion_lap_features,
     find_ensemble_pdbs,
+    select_diverse_conformers,
 )
 
 
@@ -116,6 +117,9 @@ def _process_one_ensemble(
     dis_cutoff: float,
     dis_step: float,
     ensemble_aggregation: str,
+    combo_set: str,
+    diverse_conformers: bool,
+    max_conformers_pool: int,
     overwrite: bool,
 ) -> str:
     """ensemble_motion mode: process one protein from N PDB conformations."""
@@ -123,9 +127,15 @@ def _process_one_ensemble(
     if os.path.exists(out_path) and not overwrite:
         return f"SKIP {protein_id}"
 
-    pdb_files = find_ensemble_pdbs(pdb_dir, protein_id, n_conformers)
+    # Fetch pool: use max_conformers_pool when diverse selection is requested
+    pool_size = max_conformers_pool if diverse_conformers else n_conformers
+    pdb_files = find_ensemble_pdbs(pdb_dir, protein_id, pool_size)
     if not pdb_files:
         return f"MISSING_PDB {protein_id}"
+
+    # Subsample to the most diverse n_conformers (Cα RMSD maximin)
+    if diverse_conformers and len(pdb_files) > n_conformers:
+        pdb_files = select_diverse_conformers(pdb_files, n_conformers)
 
     protein_nma_dir = os.path.join(nma_pca_dir, protein_id)
     if not os.path.isdir(protein_nma_dir):
@@ -147,6 +157,7 @@ def _process_one_ensemble(
             dis_cutoff=dis_cutoff,
             dis_step=dis_step,
             ensemble_aggregation=ensemble_aggregation,
+            combo_set=combo_set,
             print_progress=False,
         )
         return f"OK {protein_id}"
@@ -193,6 +204,15 @@ def main():
     parser.add_argument("--motion_field", type=float, default=None)
     parser.add_argument("--ensemble_aggregation", default="mean_std",
                         choices=["mean_std", "mean_only", "all"])
+    parser.add_argument("--combo_set", default="full", choices=["full", "reduced"],
+                        help="Element combination scheme: 'full'=11×11=121 combos "
+                             "(default), 'reduced'=7×7=49 combos (no S-specific pairs).")
+    parser.add_argument("--diverse_conformers", action="store_true",
+                        help="Select the most diverse n_conformers from a larger pool "
+                             "using greedy Cα RMSD maximin (requires --max_conformers_pool).")
+    parser.add_argument("--max_conformers_pool", type=int, default=10,
+                        help="Pool size to draw from when --diverse_conformers is set "
+                             "(default 10). The n_conformers most diverse are selected.")
     args = parser.parse_args()
 
     if args.mode == "ensemble_motion" and args.nma_pca_dir is None:
@@ -244,6 +264,9 @@ def main():
             dis_cutoff=args.dis_cutoff,
             dis_step=args.dis_step,
             ensemble_aggregation=args.ensemble_aggregation,
+            combo_set=args.combo_set,
+            diverse_conformers=args.diverse_conformers,
+            max_conformers_pool=args.max_conformers_pool,
             overwrite=args.overwrite,
         )
     else:
