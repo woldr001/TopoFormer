@@ -506,8 +506,7 @@ python protein_function/scripts/preprocess_training_data.py \
     --sampling_dir  /mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling \
     --annotation_file /mnt/research/woldring_lab/TopoFormer-MF/raw/annotations.tsv \
     --fasta_file    /mnt/research/woldring_lab/TopoFormer-MF/raw/sequences.fasta \
-    --output_dir    /mnt/research/woldring_lab/TopoFormer-MF/datasets \
-    --overwrite
+    --output_dir    /mnt/research/woldring_lab/TopoFormer-MF/datasets
 ```
 
 Verify output:
