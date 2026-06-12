@@ -14,7 +14,13 @@ Two feature modes are supported:
     - 200 filtration steps (0–20 Å)
     - 121 element combinations (11 motion-side × 11 static-side cross-pairs)
 
-Both encoders use hidden_size=256, 4 layers (appropriate for GO annotation
+**sidechain_centroid** (``get_sidechain_topt_config``):
+    Input [B, 12, 200, 15] — side-chain-centroid ensemble topology.
+    - 12 channels (6 stats × mean + 6 stats × std across 10 conformations)
+    - 200 filtration steps (0–40 Å at 0.2 Å)
+    - 15 side-chain-type combinations (flat list over 4 chemical classes)
+
+All encoders use hidden_size=256, 4 layers (appropriate for GO annotation
 dataset scale of 30k–100k proteins; a full 86M-parameter ViT would overfit).
 """
 
@@ -105,6 +111,64 @@ def get_ensemble_motion_topt_config(
         num_channels: Spectral statistic channels × ensemble stats (default 12).
         image_size: (height, width) = (n_filtrations, n_combinations).
         patch_size: (1, 121) gives one token per filtration step → 200 tokens.
+        hidden_size: Transformer hidden dimension (default 256).
+        num_hidden_layers: Number of transformer encoder layers (default 4).
+        num_attention_heads: Number of attention heads (default 4).
+        intermediate_size: Feed-forward intermediate dimension (default 1024).
+        hidden_dropout_prob: Dropout on hidden layers.
+        attention_probs_dropout_prob: Dropout on attention weights.
+        mask_ratio: 0.0 disables masking during fine-tuning.
+        pooler_type: 'cls_token' or 'avg_token'.
+        **overrides: Any additional TopTConfig keyword arguments.
+
+    Returns:
+        A ``TopTConfig`` instance ready for ``TopTModel(config)``.
+    """
+    return TopTConfig(
+        num_channels=num_channels,
+        image_size=image_size,
+        patch_size=patch_size,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        intermediate_size=intermediate_size,
+        hidden_dropout_prob=hidden_dropout_prob,
+        attention_probs_dropout_prob=attention_probs_dropout_prob,
+        mask_ratio=mask_ratio,
+        pooler_type=pooler_type,
+        **overrides,
+    )
+
+
+def get_sidechain_topt_config(
+    num_channels: int = 12,
+    image_size: tuple = (200, 15),
+    patch_size: tuple = (1, 15),
+    hidden_size: int = 256,
+    num_hidden_layers: int = 4,
+    num_attention_heads: int = 4,
+    intermediate_size: int = 1024,
+    hidden_dropout_prob: float = 0.1,
+    attention_probs_dropout_prob: float = 0.1,
+    mask_ratio: float = 0.0,
+    pooler_type: str = "cls_token",
+    **overrides,
+) -> TopTConfig:
+    """Return a TopTConfig sized for side-chain-centroid ensemble [12, 200, 15] features.
+
+    The 12-channel input encodes ensemble information:
+      - Channels 0-5:  mean topology feature across 10 conformations
+      - Channels 6-11: std  topology feature across 10 conformations
+
+    The 15-combination width comes from the flat list of side-chain-type subsets
+    (4 singles + 6 pairs + 4 triples + 1 quadruple) over the four chemical classes
+    (nonpolar, aromatic, polar-uncharged, polar-charged).  Each residue is reduced
+    to the geometric centroid of its side-chain heavy atoms (glycine → Cα).
+
+    Args:
+        num_channels: Spectral statistic channels × ensemble stats (default 12).
+        image_size: (height, width) = (n_filtrations, n_combinations) = (200, 15).
+        patch_size: (1, 15) gives one token per filtration step → 200 tokens.
         hidden_size: Transformer hidden dimension (default 256).
         num_hidden_layers: Number of transformer encoder layers (default 4).
         num_attention_heads: Number of attention heads (default 4).

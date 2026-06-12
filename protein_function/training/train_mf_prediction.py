@@ -73,6 +73,20 @@ class ModelArguments:
     num_hidden_layers: int = field(default=4)
     num_attention_heads: int = field(default=4)
     intermediate_size: int = field(default=1024)
+    topo_channels: int = field(
+        default=6,
+        metadata={"help": "Number of topology feature channels. 6 for protein_only; "
+                           "12 for ensemble_motion and sidechain_centroid (mean+std)."},
+    )
+    topo_n_filtrations: int = field(
+        default=200,
+        metadata={"help": "Number of filtration steps (topology feature height)."},
+    )
+    topo_n_combinations: int = field(
+        default=15,
+        metadata={"help": "Number of element/type combinations (topology feature width). "
+                           "15 for protein_only and sidechain_centroid; 121 for ensemble_motion."},
+    )
     esm_dim: int = field(default=1152, metadata={"help": "ESM embedding dimension."})
     prottrans_dim: int = field(default=1024, metadata={"help": "ProtTrans embedding dimension."})
     seq_proj_dim: int = field(default=512)
@@ -251,6 +265,9 @@ def train():
     # Model
     # ------------------------------------------------------------------
     topt_config = get_mini_topt_config(
+        num_channels=model_args.topo_channels,
+        image_size=(model_args.topo_n_filtrations, model_args.topo_n_combinations),
+        patch_size=(1, model_args.topo_n_combinations),
         hidden_size=model_args.hidden_size,
         num_hidden_layers=model_args.num_hidden_layers,
         num_attention_heads=model_args.num_attention_heads,

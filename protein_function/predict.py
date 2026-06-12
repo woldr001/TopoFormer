@@ -69,6 +69,9 @@ from protein_function.models.modeling_topo_function import TopoFunctionModel
 def load_model(
     model_dir: str,
     device: str = None,
+    topo_channels: int = 6,
+    topo_n_filtrations: int = 200,
+    topo_n_combinations: int = 15,
 ) -> Tuple[TopoFunctionModel, List[str], object]:
     """Load a trained model, GO term list, and topology scaler from a directory.
 
@@ -81,6 +84,11 @@ def load_model(
     Args:
         model_dir: Path to the directory saved by the training script.
         device: Torch device string. Defaults to 'cuda' if available.
+        topo_channels: Topology feature channels the model was trained with.
+            6 for protein_only; 12 for ensemble_motion and sidechain_centroid.
+        topo_n_filtrations: Number of filtration steps (topology height).
+        topo_n_combinations: Number of element/type combinations (topology width).
+            15 for protein_only and sidechain_centroid; 121 for ensemble_motion.
 
     Returns:
         (model, go_terms, topo_scaler) tuple.
@@ -103,7 +111,11 @@ def load_model(
 
     # Reconstruct model
     num_mf_labels = len(go_terms)
-    topt_config = get_mini_topt_config()
+    topt_config = get_mini_topt_config(
+        num_channels=topo_channels,
+        image_size=(topo_n_filtrations, topo_n_combinations),
+        patch_size=(1, topo_n_combinations),
+    )
     model = TopoFunctionModel(topt_config=topt_config, num_mf_labels=num_mf_labels)
 
     # Load weights
