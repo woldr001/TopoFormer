@@ -621,6 +621,100 @@ and large-scale screening.
 
 ---
 
+## Step 3C: Side-chain centroid configuration (residue-level topology)
+
+A third topology configuration that operates at **residue resolution** rather than
+atom resolution. Instead of the positions of individual heavy atoms (C, N, O, S),
+each residue is collapsed to a single point — the **geometric centroid of its
+side-chain heavy atoms** (all heavy atoms excluding backbone N, Cα, C, O). Glycine,
+which has no side-chain heavy atoms, falls back to its Cα coordinate.
+
+### Side-chain-type combinations
+
+Each residue is assigned to one of four chemical classes:
+
+| Class | Label | Residues |
+|-------|-------|----------|
+| 0 | nonpolar / hydrophobic | G A V L I M P |
+| 1 | aromatic | F W Y |
+| 2 | polar / uncharged | S T C N Q |
+| 3 | polar / charged | D E K R H |
+
+Topology is computed over a **flat list of 15 type combinations** (not a
+cross-product): every non-empty subset of the four classes —
+4 singles + 6 pairs + 4 triples + 1 quadruple = 15. For each combination, the
+centroids of all residues whose class is in the subset are collected and a full
+all-pairs Persistent Laplacian (dim-0) filtration is run over them.
+
+### Configuration summary
+
+| Parameter | Value |
+|-----------|-------|
+| Topological points | side-chain centroids (Gly → Cα) |
+| Combinations | 15 side-chain-type subsets (flat list) |
+| Conformations | 10 (all, mean + std aggregation) |
+| `--dis_start` / `--dis_cutoff` / `--dis_step` | 0.0 / 40.0 / 0.2 → **200 filtration steps** |
+| Spectral statistics | 6 means + 6 std = 12 channels |
+| NMA-PCA required? | **No** — this mode is not motion-guided |
+| **Output shape** | **`[12, 200, 15]`** |
+
+```
+[12, 200, 15]
+ │    │   │
+ │    │   └── side-chain-type combination index  (15 flat subsets)
+ │    └─────── filtration distance step          (0.0 → 39.8 Å, 200 steps of 0.2 Å)
+ └──────────── channel                           (6 spectral stats × mean + 6 × std = 12)
+```
+
+### Run (SLURM array job)
+
+This mode needs only the PDB ensembles — no NMA-PCA step is required, so it can be
+run directly after preprocessing.
+
+```bash
+bash protein_function/scripts/submit_topo_features_sidechain.sh
+# Output: /mnt/research/woldring_lab/TopoFormer-MF/topo_features_sidechain/
+```
+
+Single-protein test run:
+
+```bash
+export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
+python protein_function/topo_extraction/sidechain_topo_embedding.py \
+    --protein_id    A0A010 \
+    --pdb_dir       /mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling \
+    --output_folder /mnt/research/woldring_lab/TopoFormer-MF/topo_features_sidechain
+```
+
+### Verify output shape is `(12, 200, 15)`
+
+```bash
+python - <<'PY'
+import os, numpy as np
+d = '/mnt/research/woldring_lab/TopoFormer-MF/topo_features_sidechain'
+files = [f for f in os.listdir(d) if f.endswith('.npy')]
+print(f'n_files: {len(files)}')
+bad = []
+for f in files:
+    arr = np.load(os.path.join(d, f))
+    if arr.shape != (12, 200, 15):
+        bad.append((f, arr.shape))
+    elif not np.isfinite(arr).all():
+        bad.append((f, 'has inf/nan'))
+print(f'Bad files: {len(bad)}')
+for b in bad[:10]: print(' ', b)
+PY
+```
+
+### Train with side-chain features
+
+Point `--topo_dir` at `topo_features_sidechain/`. The input shape is `[12, 200, 15]`;
+the model config adapts to the topology feature shape at training time, so no code
+change is needed. Keep this directory separate from the other configurations so all
+files in a training run share one shape.
+
+---
+
 ## Step 4: Pre-compute sequence embeddings (ESM-2 + ProtTrans)
 
 ### Why precompute

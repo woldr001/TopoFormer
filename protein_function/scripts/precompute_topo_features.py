@@ -57,6 +57,9 @@ from protein_function.topo_extraction.ensemble_motion_topo_embedding import (
     find_ensemble_pdbs,
     select_diverse_conformers,
 )
+from protein_function.topo_extraction.sidechain_topo_embedding import (
+    generate_sidechain_lap_features,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +168,42 @@ def _process_one_ensemble(
         return f"ERROR {protein_id}: {exc}"
 
 
+def _process_one_sidechain(
+    protein_id: str,
+    pdb_dir: str,
+    output_dir: str,
+    n_conformers: int,
+    dis_start: float,
+    dis_cutoff: float,
+    dis_step: float,
+    ensemble_aggregation: str,
+    overwrite: bool,
+) -> str:
+    """sidechain_centroid mode: process one protein from N PDB conformations."""
+    out_path = os.path.join(output_dir, f"{protein_id}.npy")
+    if os.path.exists(out_path) and not overwrite:
+        return f"SKIP {protein_id}"
+
+    pdb_files = find_ensemble_pdbs(pdb_dir, protein_id, n_conformers)
+    if not pdb_files:
+        return f"MISSING_PDB {protein_id}"
+
+    try:
+        generate_sidechain_lap_features(
+            output_folder=output_dir,
+            protein_id=protein_id,
+            pdb_files=pdb_files,
+            dis_start=dis_start,
+            dis_cutoff=dis_cutoff,
+            dis_step=dis_step,
+            ensemble_aggregation=ensemble_aggregation,
+            print_progress=False,
+        )
+        return f"OK {protein_id}"
+    except Exception as exc:
+        return f"ERROR {protein_id}: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -174,12 +213,12 @@ def main():
         description="Batch topology feature extraction for protein function prediction."
     )
     parser.add_argument("--mode", default="protein_only",
-                        choices=["protein_only", "ensemble_motion"],
+                        choices=["protein_only", "ensemble_motion", "sidechain_centroid"],
                         help="Feature extraction mode (default: protein_only).")
     parser.add_argument("--pdb_dir", required=True,
                         help="For protein_only: directory of <protein_id>.pdb files. "
-                             "For ensemble_motion: root dir where each protein has a "
-                             "subdirectory of conformation PDB files.")
+                             "For ensemble_motion / sidechain_centroid: root dir where "
+                             "each protein has a subdirectory of conformation PDB files.")
     parser.add_argument("--output_dir", required=True,
                         help="Directory for output .npy feature files.")
     parser.add_argument("--pdb_list", default=None,
@@ -224,7 +263,7 @@ def main():
     if args.pdb_list:
         with open(args.pdb_list) as f:
             protein_ids = [l.strip() for l in f if l.strip()]
-    elif args.mode == "ensemble_motion":
+    elif args.mode in ("ensemble_motion", "sidechain_centroid"):
         # Each protein has its own subdirectory
         protein_ids = sorted(
             d for d in os.listdir(args.pdb_dir)
@@ -267,6 +306,18 @@ def main():
             combo_set=args.combo_set,
             diverse_conformers=args.diverse_conformers,
             max_conformers_pool=args.max_conformers_pool,
+            overwrite=args.overwrite,
+        )
+    elif args.mode == "sidechain_centroid":
+        worker = partial(
+            _process_one_sidechain,
+            pdb_dir=args.pdb_dir,
+            output_dir=args.output_dir,
+            n_conformers=args.n_conformers,
+            dis_start=args.dis_start,
+            dis_cutoff=args.dis_cutoff,
+            dis_step=args.dis_step,
+            ensemble_aggregation=args.ensemble_aggregation,
             overwrite=args.overwrite,
         )
     else:
