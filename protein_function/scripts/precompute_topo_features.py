@@ -178,8 +178,16 @@ def _process_one_sidechain(
     dis_step: float,
     ensemble_aggregation: str,
     overwrite: bool,
+    use_gpu: bool = False,
+    device: str = None,
+    gpu_dtype: str = "float64",
+    max_batch_matrices: int = 4096,
 ) -> str:
-    """sidechain_centroid mode: process one protein from N PDB conformations."""
+    """sidechain_centroid mode: process one protein from N PDB conformations.
+
+    When ``use_gpu`` is set, dispatches to the tensor-batched GPU implementation
+    (``sidechain_topo_embedding_gpu``); otherwise uses the CPU reference.
+    """
     out_path = os.path.join(output_dir, f"{protein_id}.npy")
     if os.path.exists(out_path) and not overwrite:
         return f"SKIP {protein_id}"
@@ -189,16 +197,37 @@ def _process_one_sidechain(
         return f"MISSING_PDB {protein_id}"
 
     try:
-        generate_sidechain_lap_features(
-            output_folder=output_dir,
-            protein_id=protein_id,
-            pdb_files=pdb_files,
-            dis_start=dis_start,
-            dis_cutoff=dis_cutoff,
-            dis_step=dis_step,
-            ensemble_aggregation=ensemble_aggregation,
-            print_progress=False,
-        )
+        if use_gpu:
+            # Lazy import so CPU-only runs never require torch.
+            import torch
+            from protein_function.topo_extraction.sidechain_topo_embedding_gpu import (
+                generate_sidechain_lap_features_gpu,
+            )
+            dtype = torch.float32 if gpu_dtype == "float32" else torch.float64
+            generate_sidechain_lap_features_gpu(
+                output_folder=output_dir,
+                protein_id=protein_id,
+                pdb_files=pdb_files,
+                dis_start=dis_start,
+                dis_cutoff=dis_cutoff,
+                dis_step=dis_step,
+                ensemble_aggregation=ensemble_aggregation,
+                device=device,
+                dtype=dtype,
+                max_batch_matrices=max_batch_matrices,
+                print_progress=False,
+            )
+        else:
+            generate_sidechain_lap_features(
+                output_folder=output_dir,
+                protein_id=protein_id,
+                pdb_files=pdb_files,
+                dis_start=dis_start,
+                dis_cutoff=dis_cutoff,
+                dis_step=dis_step,
+                ensemble_aggregation=ensemble_aggregation,
+                print_progress=False,
+            )
         return f"OK {protein_id}"
     except Exception as exc:
         return f"ERROR {protein_id}: {exc}"
@@ -252,10 +281,33 @@ def main():
     parser.add_argument("--max_conformers_pool", type=int, default=10,
                         help="Pool size to draw from when --diverse_conformers is set "
                              "(default 10). The n_conformers most diverse are selected.")
+    # sidechain_centroid GPU acceleration
+    parser.add_argument("--use_gpu", action="store_true",
+                        help="[sidechain_centroid] Use the tensor-batched GPU "
+                             "extractor (requires PyTorch; runs single-process).")
+    parser.add_argument("--device", default=None,
+                        help="[--use_gpu] Torch device ('cuda' for NVIDIA/ROCm GPUs, "
+                             "'cpu'). Auto-detected if omitted.")
+    parser.add_argument("--gpu_dtype", default="float64",
+                        choices=["float64", "float32"],
+                        help="[--use_gpu] Precision (float64 matches CPU; float32 faster).")
+    parser.add_argument("--max_batch_matrices", type=int, default=4096,
+                        help="[--use_gpu] Matrices per eigvalsh call; lower if OOM.")
     args = parser.parse_args()
 
     if args.mode == "ensemble_motion" and args.nma_pca_dir is None:
         parser.error("--nma_pca_dir is required for ensemble_motion mode.")
+
+    if args.use_gpu and args.mode != "sidechain_centroid":
+        parser.error("--use_gpu is only supported for --mode sidechain_centroid.")
+
+    if args.use_gpu and args.n_workers != 1:
+        logger.warning(
+            "--use_gpu runs single-process (GPU batching already parallelises the "
+            "work; multiple processes would oversubscribe one GPU). Forcing "
+            "--n_workers 1."
+        )
+        args.n_workers = 1
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -319,6 +371,10 @@ def main():
             dis_step=args.dis_step,
             ensemble_aggregation=args.ensemble_aggregation,
             overwrite=args.overwrite,
+            use_gpu=args.use_gpu,
+            device=args.device,
+            gpu_dtype=args.gpu_dtype,
+            max_batch_matrices=args.max_batch_matrices,
         )
     else:
         worker = partial(

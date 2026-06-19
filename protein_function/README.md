@@ -721,6 +721,67 @@ the model config adapts to the topology feature shape at training time, so no co
 change is needed. Keep this directory separate from the other configurations so all
 files in a training run share one shape.
 
+### GPU acceleration (OLCF Frontier / any CUDA or ROCm GPU)
+
+The side-chain extractor's bottleneck is 30,000 small eigendecompositions per
+protein (200 filtration steps × 15 combos × 10 conformations), all run
+sequentially on CPU. `sidechain_topo_embedding_gpu.py` batches every threshold
+and conformation for a combo into a single `torch.linalg.eigvalsh` call,
+collapsing those 30,000 sequential calls into ~15 batched GPU kernels. It
+produces the same `[12, 200, 15]` output as the CPU path (matched to
+floating-point rounding at the 5th decimal).
+
+On Frontier (AMD MI250X) install a **ROCm** PyTorch build:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.1
+python -c "import torch; print(torch.cuda.is_available())"   # True on a GPU node
+```
+
+Single-protein GPU run:
+
+```bash
+python protein_function/topo_extraction/sidechain_topo_embedding_gpu.py \
+    --protein_id    A0A010 \
+    --pdb_dir       /path/to/v0/sampling \
+    --output_folder /path/to/topo_features_sidechain_gpu \
+    --device cuda --dtype float64
+```
+
+Batch GPU run via the shared driver (`--use_gpu` forces single-process so it
+does not oversubscribe one GPU):
+
+```bash
+python protein_function/scripts/precompute_topo_features.py \
+    --mode sidechain_centroid --use_gpu --device cuda \
+    --pdb_dir  /path/to/v0/sampling \
+    --pdb_list /path/to/protein_ids.txt \
+    --output_dir /path/to/topo_features_sidechain_gpu \
+    --n_conformers 10 --dis_start 0.0 --dis_cutoff 40.0 --dis_step 0.2 \
+    --ensemble_aggregation mean_std --max_batch_matrices 4096
+```
+
+A Frontier SLURM template is provided at
+`protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh`
+(edit the account, paths, and module-load lines for your allocation).
+
+**Verify GPU ≡ CPU agreement** before trusting a full run:
+
+```bash
+python protein_function/scripts/verify_gpu_parity.py \
+    --protein_id A0A031WDA8 --pdb_dir /path/to/v0/sampling \
+    --device cuda --dtype float64
+# Reports max abs/rel diff and the CPU→GPU speedup. Expect max abs diff < 1e-2
+# (dominated by the large-magnitude `sum` statistic at the float32 level).
+```
+
+Notes:
+- Keep `--dtype float64` (the default) to match the CPU reference; MI250X has
+  strong FP64 throughput. `float32` is faster but only use it after confirming
+  parity is acceptable for your downstream model.
+- If a very large protein OOMs the GPU, lower `--max_batch_matrices` (the
+  threshold-chunk size auto-shrinks with N, but this gives you a manual knob).
+
 ---
 
 ## Step 4: Pre-compute sequence embeddings (ESM-2 + ProtTrans)

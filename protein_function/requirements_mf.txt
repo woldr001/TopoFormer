@@ -27,3 +27,10 @@ pandas
 transformers==4.24.0
 prody==2.4.1
 matplotlib<3.6
+
+# PyTorch is NOT pinned here — install it separately with the index URL that
+# matches your accelerator, because the wheel differs by CUDA/ROCm version:
+#   NVIDIA (CUDA 12.4): pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#   AMD Frontier (ROCm): pip install torch --index-url https://download.pytorch.org/whl/rocm6.1
+# torch is required only for model training/inference and the GPU side-chain
+# extractor (sidechain_topo_embedding_gpu.py); the CPU feature pipeline does not need it.
