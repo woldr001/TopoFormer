@@ -761,9 +761,19 @@ python protein_function/scripts/precompute_topo_features.py \
     --ensemble_aggregation mean_std --max_batch_matrices 4096
 ```
 
-A Frontier SLURM template is provided at
-`protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh`
-(edit the account, paths, and module-load lines for your allocation).
+SLURM templates are provided for both clusters:
+- **MSU HPCC (ICER, NVIDIA GPUs):**
+  `protein_function/scripts/sbatch_topo_features_sidechain_gpu_msu.sh` — uses the
+  `topoformer_mf` env PATH activation and a CUDA torch build. Submit the
+  20-protein test set with:
+  ```bash
+  sbatch --array=1-1 protein_function/scripts/sbatch_topo_features_sidechain_gpu_msu.sh
+  ```
+  (Install CUDA torch into the env once:
+  `pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124`.)
+- **OLCF Frontier (AMD MI250X / ROCm):**
+  `protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh`
+  (edit the account, paths, and module-load lines for your allocation).
 
 **Verify GPU ≡ CPU agreement** before trusting a full run:
 
