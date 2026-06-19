@@ -10,9 +10,15 @@ Usage
 """
 
 import argparse
+import os
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from protein_function.topo_extraction.sidechain_topo_embedding import (
     CLASS_LABELS,
