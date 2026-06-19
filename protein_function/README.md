@@ -232,11 +232,19 @@ export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
 # Verify the right Python is active
 which python   # should show .../topoformer_mf/bin/python
 
-# Install any missing packages into the environment
-python -m pip install "transformers==4.24.0"   # CRITICAL — see below
-python -m pip install prody                    # required for NMA-PCA step
+# Install all pinned packages into the environment in one shot
+python -m pip install -r protein_function/requirements_mf.txt
 ```
 
+> **Always install from `requirements_mf.txt`, not ad-hoc `pip install` commands.**
+> `numpy`, `scipy`, `prody`, and `matplotlib` have a narrow window of mutually
+> compatible versions (`scipy==1.7.3` and `prody==2.4.1` both require
+> `numpy<1.23`, but `matplotlib>=3.6` requires `numpy>=1.23`). Running
+> `pip install matplotlib` or `pip install prody` on its own will silently
+> upgrade numpy and break the rest of the pipeline. `requirements_mf.txt`
+> pins a set that satisfies all of them simultaneously
+> (`numpy==1.22.4`, `matplotlib<3.6`).
+>
 > **Why `transformers==4.24.0`?**
 > `modeling_topt.py` imports `find_pruneable_heads_and_indices` from
 > `transformers.pytorch_utils`, a symbol removed in newer releases.
@@ -302,7 +310,7 @@ This step is **required** for the motion-guided topology extraction. It produces
 GNM/PCA profiles that determine which residues are treated as "motion" atoms.
 
 The NMA-PCA script is built into this repository — no external pipeline is needed.
-It requires ProDy (`python -m pip install prody`).
+It requires ProDy, already pinned in `requirements_mf.txt` (see Step 0/Environment Setup above).
 
 ### Single protein (test run)
 

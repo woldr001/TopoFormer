@@ -130,9 +130,10 @@ git checkout protein-motion-topology
 conda create -n topoformer python=3.8
 conda activate topoformer
 
-# Core dependencies
-pip install numpy scipy scikit-learn pandas torch torchvision
-pip install "transformers==4.24.0"   # CRITICAL: newer versions break modeling_topt.py
+# Core dependencies — pinned together in requirements_mf.txt to avoid a
+# numpy/scipy/prody/matplotlib resolver conflict (see the note below)
+pip install -r protein_function/requirements_mf.txt
+pip install torch torchvision
 pip install datasets accelerate
 pip install biopython   # optional, for PDB utilities
 
@@ -140,6 +141,14 @@ pip install biopython   # optional, for PDB utilities
 pip install fair-esm        # for ESM-2
 pip install sentencepiece   # for ProtTrans tokenizer
 ```
+
+> **Always install core scientific packages from `requirements_mf.txt`,
+> not standalone `pip install numpy`/`pip install matplotlib` commands.**
+> `scipy==1.7.3` and `prody==2.4.1` both require `numpy<1.23`, but
+> `matplotlib>=3.6` requires `numpy>=1.23` — installing any one of these
+> packages independently can silently upgrade numpy and break the others.
+> `requirements_mf.txt` pins a mutually compatible set
+> (`numpy==1.22.4`, `matplotlib<3.6`).
 
 > **Why `transformers==4.24.0`?**
 > `modeling_topt.py` imports `find_pruneable_heads_and_indices` from `transformers.pytorch_utils`, a symbol removed in newer releases. Pin to 4.24.0 until the import is updated.
@@ -783,9 +792,17 @@ for go_term, prob in hits:
 pip install "transformers==4.24.0"
 ```
 
-**`ModuleNotFoundError: No module named 'numpy'`**
+**`ModuleNotFoundError: No module named 'numpy'`** (or `prody`/`matplotlib`)
 ```bash
-pip install numpy scipy scikit-learn
+pip install -r protein_function/requirements_mf.txt
+```
+
+**`ERROR: pip's dependency resolver ... numpy X is incompatible`** (after
+installing `prody` or `matplotlib` standalone)
+```bash
+# Re-pin everything to the compatible set instead of installing packages
+# one at a time — prody/scipy need numpy<1.23, matplotlib>=3.6 needs numpy>=1.23
+pip install -r protein_function/requirements_mf.txt --force-reinstall
 ```
 
 **`ModuleNotFoundError: No module named 'protein_function'`**

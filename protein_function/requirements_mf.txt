@@ -1,0 +1,29 @@
+# Pinned dependencies for the `topoformer_mf` conda environment used by the
+# protein_function/ pipeline (topology feature extraction, NMA-PCA, training,
+# inference, and plotting).
+#
+# Usage:
+#   export PATH="/mnt/home/woldring/.conda/envs/topoformer_mf/bin:$PATH"
+#   python -m pip install -r protein_function/requirements_mf.txt
+#   python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#
+# PyTorch is installed separately because it needs a CUDA-specific index URL
+# (see environment.yml for CUDA version notes).
+#
+# Why these versions are pinned together:
+#   - scipy==1.7.3   requires numpy<1.23.0,>=1.16.5
+#   - prody==2.4.1   requires numpy<1.24,>=1.10
+#   - matplotlib>=3.6 requires numpy>=1.23 (and adds a contourpy dependency
+#     that also requires numpy>=1.23) -> incompatible with the two pins above.
+#   numpy==1.22.4 and matplotlib<3.6 satisfy all three simultaneously.
+#   `pip install matplotlib` or `pip install prody` alone will happily
+#   upgrade numpy to a newer release and silently break this environment —
+#   always install from this file (or with --no-deps) instead.
+
+numpy==1.22.4
+scipy==1.7.3
+scikit-learn==1.0.2
+pandas
+transformers==4.24.0
+prody==2.4.1
+matplotlib<3.6
