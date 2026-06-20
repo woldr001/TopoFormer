@@ -33,7 +33,7 @@ set -euo pipefail
 # NOTE: PDB_DIR must be on Frontier's Lustre — copy the ensembles over with
 # Globus first (Frontier cannot read MSU's /mnt/research filesystem).
 SHARED=/lustre/orion/bip294/proj-shared
-REPO=$SHARED/TopoFormer
+REPO=$SHARED/protein_function/TopoFormer
 PDB_DIR=$SHARED/asam_ensembles/protein_function_prediction/v0/sampling
 ID_FILE=${ID_FILE:-$REPO/datasets/all_ids.txt}
 TOPO_DIR=$SHARED/topo_features_sidechain_gpu
@@ -42,14 +42,23 @@ TOPO_DIR=$SHARED/topo_features_sidechain_gpu
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CHUNK_SIZE=${CHUNK_SIZE:-1600}
 
-# ── Environment (EDIT module names to match Frontier) ─────────────────────────
-# Frontier needs a ROCm PyTorch build. Typical setup (adjust versions):
-#   module load PrgEnv-gnu
-#   module load rocm
-#   module load miniforge3            # or your own conda/venv
-#   source activate topoformer_rocm   # env containing: pip install torch \
-#                                      #   --index-url https://download.pytorch.org/whl/rocm6.1
-# Then install the CPU deps into that env once:
+# ── Environment ───────────────────────────────────────────────────────────────
+# Verified working on a frontier compute node (torch 2.6.0+rocm6.1, 8 GCDs).
+# The compute-node shell does NOT inherit an interactive `conda activate`, and
+# `salloc`/module loads print "Deactivating conda environments" — so the job
+# MUST (re)activate the env itself here. PYTHONNOUSERSITE=1 is REQUIRED: a stray
+# torch in ~/.local/.../python3.10 (missing libmagma.so) will otherwise shadow
+# the env's torch and crash every worker with an ImportError.
+ENV_PREFIX=$SHARED/protein_function/envs/topoformer_rocm
+module load PrgEnv-gnu rocm miniforge3
+# A batch shell doesn't source ~/.bashrc, so the `conda` shell function may be
+# undefined — source the hook explicitly before activating.
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$ENV_PREFIX"
+export PYTHONNOUSERSITE=1
+
+# CPU deps were installed into the env once with:
+#   pip install torch --index-url https://download.pytorch.org/whl/rocm6.1
 #   pip install -r $REPO/protein_function/requirements_mf.txt
 
 mkdir -p "$TOPO_DIR"
@@ -63,8 +72,12 @@ END=$(( END > TOTAL ? TOTAL : END ))
 
 echo "Task $TASK_ID | Lines $START–$END of $TOTAL | $(date)"
 echo "Node: $(hostname) | packing $GPUS_PER_NODE GCDs"
-python -c "import torch; print('torch', torch.__version__, '| GPUs visible:', \
-    torch.cuda.device_count())"
+# Confirm the env's ROCm torch loaded (not a stray ~/.local torch) and 8 GCDs
+# are visible — bail early with a clear message if not.
+python -c "import torch, sys; print('torch', torch.__version__, '|', torch.__file__); \
+    n = torch.cuda.device_count(); print('GPUs visible:', n); \
+    sys.exit(0 if n == ${GPUS_PER_NODE} else 1)" \
+    || { echo 'ERROR: expected '"$GPUS_PER_NODE"' GCDs / wrong torch — check env activation'; exit 1; }
 
 WORKDIR=$(mktemp -d)
 trap "rm -rf $WORKDIR" EXIT
