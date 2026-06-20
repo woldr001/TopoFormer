@@ -1,77 +1,124 @@
 #!/bin/bash
 #SBATCH --job-name=sc_topo_gpu
-#SBATCH --account=YOUR_PROJECT        # <-- set your OLCF project allocation
+#SBATCH --account=YOUR_PROJECT        # <-- OLCF project ID, e.g. -A BIP123
 #SBATCH --partition=batch
 #SBATCH --nodes=1
-#SBATCH --gpus=1                      # one MI250X GCD is plenty per task
 #SBATCH --time=02:00:00
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
 #
-# GPU-batched side-chain centroid topology features for OLCF Frontier (MI250X / ROCm).
+# GPU-batched side-chain centroid topology features for OLCF Frontier
+# (4x MI250X = 8 GCDs per node / ROCm).
 #
-# This is a TEMPLATE — adjust the account, paths, and module names to your
-# Frontier environment. Unlike the CPU SLURM scripts, GPU runs are
-# single-process per task (the eigvalsh batching already provides the
-# parallelism), so each array task processes a chunk of proteins SEQUENTIALLY
-# on one GPU rather than fanning out across CPU cores.
+# This is a TEMPLATE — adjust the account, paths, and module-load lines.
+#
+# IMPORTANT: a single GCD uses only 1/8 of a Frontier node, and you are billed
+# per whole node, so this script PACKS the node: it splits each array task's
+# chunk of proteins into GPUS_PER_NODE shards and runs one process per GCD
+# concurrently (each process is single-GPU; --use_gpu forces --n_workers 1).
+#
+# Read protein_function/README.md "Performance notes: CPU vs GPU" first — for
+# this small-eigendecomposition workload the GPU is only ~1.2-2x faster than a
+# CPU core, so the CPU multiprocessing path is usually the better tool. Use
+# Frontier GPUs only when that is the allocation you have to spend.
 #
 # Output shape per protein: [12, 200, 15]
 
 set -euo pipefail
 
 # ── Paths (EDIT THESE) ────────────────────────────────────────────────────────
+# NOTE: PDB_DIR must be on Frontier's Lustre — copy the ensembles over with
+# Globus first (Frontier cannot read MSU's /mnt/research filesystem).
 REPO=/lustre/orion/proj-shared/YOUR_PROJECT/TopoFormer
 PDB_DIR=/lustre/orion/proj-shared/YOUR_PROJECT/asam_ensembles/v0/sampling
-ID_FILE=$REPO/datasets/all_ids.txt
+ID_FILE=${ID_FILE:-$REPO/datasets/all_ids.txt}
 TOPO_DIR=/lustre/orion/proj-shared/YOUR_PROJECT/topo_features_sidechain_gpu
 
-# Proteins per array task (processed sequentially on the GPU).
-CHUNK_SIZE=${CHUNK_SIZE:-200}
+# GCDs to use per node (Frontier has 8). Proteins per array task = CHUNK_SIZE.
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+CHUNK_SIZE=${CHUNK_SIZE:-1600}
 
 # ── Environment (EDIT module names to match Frontier) ─────────────────────────
-# Frontier provides PyTorch via modules or a conda env with a ROCm build.
-# Example (adjust to your setup):
-#   module load PrgEnv-gnu rocm
-#   source /lustre/orion/proj-shared/YOUR_PROJECT/envs/topoformer_rocm/bin/activate
-# Verify torch sees the GPU:
-#   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# Frontier needs a ROCm PyTorch build. Typical setup (adjust versions):
+#   module load PrgEnv-gnu
+#   module load rocm
+#   module load miniforge3            # or your own conda/venv
+#   source activate topoformer_rocm   # env containing: pip install torch \
+#                                      #   --index-url https://download.pytorch.org/whl/rocm6.1
+# Then install the CPU deps into that env once:
+#   pip install -r $REPO/protein_function/requirements_mf.txt
 
 mkdir -p "$TOPO_DIR"
 
-# ── Select this task's chunk of proteins ──────────────────────────────────────
+# ── Select this array task's chunk of proteins ────────────────────────────────
 TOTAL=$(wc -l < "$ID_FILE")
-START=$(( (SLURM_ARRAY_TASK_ID - 1) * CHUNK_SIZE + 1 ))
-END=$(( SLURM_ARRAY_TASK_ID * CHUNK_SIZE ))
+TASK_ID=${SLURM_ARRAY_TASK_ID:-1}
+START=$(( (TASK_ID - 1) * CHUNK_SIZE + 1 ))
+END=$(( TASK_ID * CHUNK_SIZE ))
 END=$(( END > TOTAL ? TOTAL : END ))
 
-echo "Task $SLURM_ARRAY_TASK_ID | Lines $START–$END of $TOTAL | $(date)"
-echo "Node: $(hostname)"
-python -c "import torch; print('GPU:', torch.cuda.is_available(), \
-    torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+echo "Task $TASK_ID | Lines $START–$END of $TOTAL | $(date)"
+echo "Node: $(hostname) | packing $GPUS_PER_NODE GCDs"
+python -c "import torch; print('torch', torch.__version__, '| GPUs visible:', \
+    torch.cuda.device_count())"
 
-TMP_IDS=$(mktemp)
-trap "rm -f $TMP_IDS" EXIT
-sed -n "${START},${END}p" "$ID_FILE" > "$TMP_IDS"
+WORKDIR=$(mktemp -d)
+trap "rm -rf $WORKDIR" EXIT
+sed -n "${START},${END}p" "$ID_FILE" > "$WORKDIR/chunk_ids.txt"
 
-echo "Proteins in this chunk:"
-cat "$TMP_IDS"
-echo ""
+# Split this chunk into one shard per GCD (split -n l/N divides by line count).
+split -n "l/${GPUS_PER_NODE}" -d --additional-suffix=.txt \
+    "$WORKDIR/chunk_ids.txt" "$WORKDIR/shard_"
 
-# ── Run (single GPU process; --n_workers is forced to 1 by --use_gpu) ─────────
-srun -n1 python "$REPO/protein_function/scripts/precompute_topo_features.py" \
-    --mode                  sidechain_centroid \
-    --use_gpu \
-    --device                cuda \
-    --gpu_dtype             float64 \
-    --pdb_dir               "$PDB_DIR" \
-    --output_dir            "$TOPO_DIR" \
-    --pdb_list              "$TMP_IDS" \
-    --n_conformers          10 \
-    --dis_start             0.0 \
-    --dis_cutoff            40.0 \
-    --dis_step              0.2 \
-    --ensemble_aggregation  mean_std \
-    --max_batch_matrices    4096
+# ── Launch one process per GCD, each pinned to its GCD via ROCR_VISIBLE_DEVICES ─
+pids=()
+gcd=0
+for shard in "$WORKDIR"/shard_*.txt; do
+    [ -s "$shard" ] || { gcd=$((gcd + 1)); continue; }   # skip empty shard
+    echo "  GCD $gcd → $(wc -l < "$shard") proteins ($shard)"
+    ROCR_VISIBLE_DEVICES=$gcd \
+    python "$REPO/protein_function/scripts/precompute_topo_features.py" \
+        --mode                  sidechain_centroid \
+        --use_gpu \
+        --device                cuda \
+        --gpu_dtype             float64 \
+        --pdb_dir               "$PDB_DIR" \
+        --output_dir            "$TOPO_DIR" \
+        --pdb_list              "$shard" \
+        --n_conformers          10 \
+        --dis_start             0.0 \
+        --dis_cutoff            40.0 \
+        --dis_step              0.2 \
+        --ensemble_aggregation  mean_std \
+        --max_batch_matrices    4096 \
+        > "$WORKDIR/gcd_${gcd}.log" 2>&1 &
+    pids+=($!)
+    gcd=$((gcd + 1))
+done
 
-echo "Task $SLURM_ARRAY_TASK_ID done | $(date)"
+# Wait for all GCD workers; fail the job if any worker failed.
+rc=0
+for pid in "${pids[@]}"; do
+    wait "$pid" || rc=1
+done
+
+# Surface each worker's log into the main job output.
+for log in "$WORKDIR"/gcd_*.log; do
+    echo "──── $log ────"
+    cat "$log"
+done
+
+echo "Task $TASK_ID done (rc=$rc) | $(date)"
+exit $rc
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Submit examples (from $REPO):
+#
+#   # One node, all 8 GCDs, 1600 proteins (200 per GCD) in a single array task:
+#   sbatch --array=1-1 protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh
+#
+#   # Full dataset across many nodes, 1600 proteins per node-task:
+#   N=$(wc -l < /lustre/orion/proj-shared/YOUR_PROJECT/TopoFormer/datasets/all_ids.txt)
+#   NTASKS=$(( (N + 1599) / 1600 ))
+#   sbatch --array=1-${NTASKS} protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh
+# ──────────────────────────────────────────────────────────────────────────────
