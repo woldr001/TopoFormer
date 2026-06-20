@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=sc_topo_gpu
-#SBATCH --account=YOUR_PROJECT        # <-- OLCF project ID, e.g. -A BIP123
+#SBATCH --account=bip294              # OLCF project ID
 #SBATCH --partition=batch
 #SBATCH --nodes=1
 #SBATCH --time=02:00:00
@@ -10,7 +10,8 @@
 # GPU-batched side-chain centroid topology features for OLCF Frontier
 # (4x MI250X = 8 GCDs per node / ROCm).
 #
-# This is a TEMPLATE — adjust the account, paths, and module-load lines.
+# Account and paths are set for project bip294; verify the module-load lines
+# below match what `module avail` shows on Frontier before submitting.
 #
 # IMPORTANT: a single GCD uses only 1/8 of a Frontier node, and you are billed
 # per whole node, so this script PACKS the node: it splits each array task's
@@ -26,13 +27,16 @@
 
 set -euo pipefail
 
-# ── Paths (EDIT THESE) ────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Frontier Lustre layout is /lustre/orion/<project>/proj-shared/... — your team's
+# shared root is /lustre/orion/bip294/proj-shared.
 # NOTE: PDB_DIR must be on Frontier's Lustre — copy the ensembles over with
 # Globus first (Frontier cannot read MSU's /mnt/research filesystem).
-REPO=/lustre/orion/proj-shared/YOUR_PROJECT/TopoFormer
-PDB_DIR=/lustre/orion/proj-shared/YOUR_PROJECT/asam_ensembles/v0/sampling
+SHARED=/lustre/orion/bip294/proj-shared
+REPO=$SHARED/TopoFormer
+PDB_DIR=$SHARED/asam_ensembles/v0/sampling
 ID_FILE=${ID_FILE:-$REPO/datasets/all_ids.txt}
-TOPO_DIR=/lustre/orion/proj-shared/YOUR_PROJECT/topo_features_sidechain_gpu
+TOPO_DIR=$SHARED/topo_features_sidechain_gpu
 
 # GCDs to use per node (Frontier has 8). Proteins per array task = CHUNK_SIZE.
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
@@ -118,7 +122,7 @@ exit $rc
 #   sbatch --array=1-1 protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh
 #
 #   # Full dataset across many nodes, 1600 proteins per node-task:
-#   N=$(wc -l < /lustre/orion/proj-shared/YOUR_PROJECT/TopoFormer/datasets/all_ids.txt)
+#   N=$(wc -l < /lustre/orion/bip294/proj-shared/TopoFormer/datasets/all_ids.txt)
 #   NTASKS=$(( (N + 1599) / 1600 ))
 #   sbatch --array=1-${NTASKS} protein_function/scripts/sbatch_topo_features_sidechain_gpu_frontier.sh
 # ──────────────────────────────────────────────────────────────────────────────
