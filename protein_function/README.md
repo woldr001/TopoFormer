@@ -792,6 +792,67 @@ Notes:
 - If a very large protein OOMs the GPU, lower `--max_batch_matrices` (the
   threshold-chunk size auto-shrinks with N, but this gives you a manual knob).
 
+### Performance notes: CPU vs GPU (read before choosing the GPU path)
+
+**TL;DR — for this workload, prefer the CPU multiprocessing path. The GPU is
+only ~1.24x faster than a single CPU core on an H200 node, and CPU
+multiprocessing across a node's many cores beats one GPU on throughput.**
+The GPU path is correct and validated; it's the right choice only on Frontier
+(where you have GPU allocation to spend) or when GPU nodes are idle while CPU
+queues are backed up.
+
+This was measured, not assumed. Benchmarks on protein `A0A017T5A5` (397
+residues, 10 conformations), `[12, 200, 15]` output, `float64`:
+
+| Hardware | CPU (full protein) | GPU (full protein) | Speedup |
+|----------|-------------------|--------------------|---------|
+| V100 node (old CPU) | 129.2s | 59.7s | 2.2x |
+| H200 node (`neh-001`) | 68.0s | 52.6s | **1.24x** |
+
+Per-conformation profiling on the H200 node reconciles exactly with the
+full-protein numbers (6.56s × 10 ≈ 68s CPU; 5.29s × 10 ≈ 52.6s GPU), confirming
+PDB parsing / aggregation overhead is negligible — the end-to-end speedup *is*
+the compute speedup.
+
+**Why the GPU win is small (and why it varies by node):**
+- The workload is thousands of *small* symmetric eigendecompositions
+  (N ≤ ~400: 200 filtration steps × 15 combos × 10 conformations). Small
+  eigensolves are latency-bound and never saturate a modern GPU, whose headline
+  FLOPS are built for large GEMMs. An H200's eigvalsh on an N=400 matrix is only
+  marginally faster than a fast CPU core.
+- The H200 nodes pair a fast GPU with an equally fast CPU, so the ratio is
+  ~1.24x. On the old V100 node the *slow* CPU made the same GPU look 2.2x
+  better — the GPU time barely changed (~5-6s/conf on both); only the CPU
+  baseline moved.
+- Per-combo, the GPU *loses* on small combos (e.g. N=70: GPU 0.105s vs CPU
+  0.032s — 3x slower, dominated by kernel-launch/tensor-build overhead) and
+  only wins ~2x on the largest combos (N≈400). The mix nets out to 1.24x.
+
+**Throughput math (the decision-relevant comparison is 1 GPU vs N CPU cores,**
+**because the CPU pipeline runs proteins in parallel via `--n_workers` while**
+**the GPU does one protein at a time):**
+- 1 H200 GPU: 1 protein / 52.6s ≈ 0.019 proteins/s
+- 1 H200-node CPU core: 1 protein / 68s ≈ 0.0147 proteins/s
+- Break-even ≈ **1.3 CPU cores = 1 H200 GPU.** Any node has far more cores than
+  that to spend on a multiprocessing job, so CPU wins decisively per node.
+- Concretely, the 20-protein test set: `--n_workers 20` finishes in ~1-2 min;
+  the GPU (sequential) takes ~18 min.
+
+**Dead ends already investigated (don't re-litigate these):**
+- *CPU adjacency-matrix caching* — `persistent_simplicialComplex_laplacian_dim0`
+  reuses the previous eigvalsh result when the threshold graph is unchanged.
+  Profiling showed only ~8% of filtration steps are skipped (`cpu_skip%`), so
+  the CPU does nearly the full work and a "breakpoint deduplication" GPU
+  optimization would save only ~8% — not worth it.
+- *BLAS multithreading flattering the CPU* — running the parity test with
+  `OMP_NUM_THREADS=1` barely changed the CPU time (57.7s → 68.0s), so threading
+  was not masking a larger GPU advantage.
+
+Reproduce any of this with
+`protein_function/scripts/profile_sidechain_bottleneck.py` (per-combo CPU vs GPU
+breakdown) and `protein_function/scripts/verify_gpu_parity.py` (full-protein
+speedup + numerical parity).
+
 ---
 
 ## Step 4: Pre-compute sequence embeddings (ESM-2 + ProtTrans)
