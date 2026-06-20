@@ -34,7 +34,7 @@ set -euo pipefail
 # Globus first (Frontier cannot read MSU's /mnt/research filesystem).
 SHARED=/lustre/orion/bip294/proj-shared
 REPO=$SHARED/TopoFormer
-PDB_DIR=$SHARED/asam_ensembles/v0/sampling
+PDB_DIR=$SHARED/asam_ensembles/protein_function_prediction/v0/sampling
 ID_FILE=${ID_FILE:-$REPO/datasets/all_ids.txt}
 TOPO_DIR=$SHARED/topo_features_sidechain_gpu
 
