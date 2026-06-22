@@ -31,10 +31,11 @@ set -euo pipefail
 # Frontier Lustre layout is /lustre/orion/<project>/proj-shared/... — your team's
 # shared root is /lustre/orion/bip294/proj-shared.
 # NOTE: PDB_DIR must be on Frontier's Lustre — copy the ensembles over with
-# Globus first (Frontier cannot read MSU's /mnt/research filesystem).
+# Globus first (Frontier cannot read MSU's /mnt/research filesystem). The
+# Globus transfer preserved the full MSU source path under asam_ensembles/.
 SHARED=/lustre/orion/bip294/proj-shared
 REPO=$SHARED/protein_function/TopoFormer
-PDB_DIR=$SHARED/asam_ensembles/protein_function_prediction/v0/sampling
+PDB_DIR=$SHARED/asam_ensembles/mnt/research/nodes/giacomo/asam_ensembles/protein_function_prediction/v0/sampling
 ID_FILE=${ID_FILE:-$REPO/datasets/all_ids.txt}
 TOPO_DIR=$SHARED/topo_features_sidechain_gpu
 
